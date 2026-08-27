@@ -14,6 +14,12 @@ import imagehash
 from PIL import Image, ImageFilter, ImageStat
 
 from .models import PipelineError
+from .video_color import (
+    VideoColorInfo,
+    hdr_sampling_failure_message,
+    probe_video_color,
+    sampling_filter,
+)
 
 
 _PROXY_ENV_NAMES = (
@@ -129,6 +135,7 @@ class VideoFrameReport:
     max_frames: int
     proxy: dict[str, object] | None = None
     authentication: dict[str, object] | None = None
+    video_color: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -143,6 +150,7 @@ class VideoFrameReport:
             "max_frames": self.max_frames,
             "proxy": self.proxy,
             "authentication": self.authentication,
+            "video_color": self.video_color,
         }
 
 
@@ -276,7 +284,7 @@ def extract_video_frames(
         candidate_dir.mkdir()
         # Sample more candidates than the final cap because filtering can reject many.
         candidate_cap = max(max_frames * 4, max_frames + 20)
-        _sample_frames(
+        color_info = _sample_frames(
             video_path,
             candidate_dir,
             interval_seconds=interval_seconds,
@@ -329,6 +337,7 @@ def extract_video_frames(
             max_frames=max_frames,
             proxy=proxy.provenance() if remote else None,
             authentication=auth.provenance() if remote else None,
+            video_color=color_info.as_dict() if isinstance(color_info, VideoColorInfo) else None,
         )
 
 
@@ -383,7 +392,9 @@ def _sample_frames(
     *,
     interval_seconds: int,
     frame_cap: int,
-) -> None:
+) -> VideoColorInfo:
+    color_info = probe_video_color(video_path)
+    filter_chain = sampling_filter(interval_seconds, color_info)
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -392,14 +403,20 @@ def _sample_frames(
         "-i",
         str(video_path),
         "-vf",
-        f"fps=1/{interval_seconds}",
+        filter_chain,
         "-frames:v",
         str(frame_cap),
         "-q:v",
         "2",
         str(output_dir / "frame-%06d.jpg"),
     ]
-    _run(command, "ffmpeg could not extract frames from the video")
+    failure = (
+        hdr_sampling_failure_message(color_info)
+        if color_info.is_hdr
+        else "ffmpeg could not extract frames from the video"
+    )
+    _run(command, failure)
+    return color_info
 
 
 def _frame_index(path: Path, *, fallback: int) -> int:
