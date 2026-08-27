@@ -69,7 +69,7 @@ def test_hdr_proxy_is_downscaled_before_tonemap_but_final_extract_is_full_resolu
 
     assert probe.index("scale=960:960") < probe.index("zscale=t=linear")
     assert "tonemap=mobius:param=0.3:desat=0" in probe
-    assert "scale=" not in extract
+    assert "scale=960:960:force_original_aspect_ratio=decrease" not in extract
     assert "eq(n\\,2)" in extract
     assert "eq(n\\,16)" in extract
     assert "tonemap=mobius:param=0.3:desat=0" in extract
