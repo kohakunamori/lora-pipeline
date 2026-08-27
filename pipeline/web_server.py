@@ -11,10 +11,10 @@ from urllib.parse import quote, unquote, urlparse
 from .models import PipelineError
 from .training_config import TrainingConfig
 from .web_app import _page, _q
-from .web_safety import FullHandler as SafetyHandler
+from .web_routes import FullHandler as RoutesHandler
 
 
-class SecureHandler(SafetyHandler):
+class SecureHandler(RoutesHandler):
     """Final Web handler with optional token auth and override-safe config edits."""
 
     def do_GET(self) -> None:  # noqa: N802
