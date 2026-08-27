@@ -116,11 +116,13 @@ def serve(
             "LAN mode requires LORA_WEB_TOKEN/--token. "
             "Use --unsafe-no-auth only on an explicitly trusted private network."
         )
+
     server = make_server(host, port, root=root, auth_token=auth_token)
     print(f"LoRA Pipeline Web: http://{host}:{port}")
     if loopback:
         print(
-            f"Remote browser: ssh -L {port}:127.0.0.1:{port} <nas>  then open http://127.0.0.1:{port}"
+            f"Remote browser: ssh -L {port}:127.0.0.1:{port} <nas>  "
+            f"then open http://127.0.0.1:{port}"
         )
     elif auth_token:
         print("LAN mode enabled with access-token authentication.")
