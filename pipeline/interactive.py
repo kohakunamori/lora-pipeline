@@ -4,7 +4,7 @@ import sys
 
 from . import interactive_metadata_hooks as _interactive_metadata_hooks  # noqa: F401
 from .i18n import initialize_interactive
-from .interactive_composition import InteractiveWizard
+from .interactive_final import InteractiveWizard
 from .tty_compat import configure_interactive_input
 
 
