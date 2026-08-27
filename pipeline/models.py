@@ -14,6 +14,7 @@ class ConceptType(StrEnum):
 class StepStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"
     DONE = "done"
     SKIPPED = "skipped"
     FAILED = "failed"
@@ -98,6 +99,8 @@ class TrainingRequest:
     base: BaseModel
     config: ResolvedConfig
     optimizer_steps: int
+    target_images_seen: int
+    resume_state: Path | None = None
     command_line: Sequence[str] = field(default_factory=tuple)
 
 
@@ -113,6 +116,7 @@ class TrainingResult:
 
 @dataclass(frozen=True)
 class GenerationCase:
+    case_id: str
     checkpoint: Path
     checkpoint_label: str
     strength: float
