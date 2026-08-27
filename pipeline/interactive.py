@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 from .i18n import initialize_interactive
-from .interactive_deletion import InteractiveWizard
+from .interactive_composition import InteractiveWizard
 from .tty_compat import configure_interactive_input
 
 
