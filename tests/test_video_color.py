@@ -110,6 +110,7 @@ def test_sample_frames_uses_hdr_tonemap_chain(monkeypatch, tmp_path) -> None:
         color_primaries="bt2020",
     )
     monkeypatch.setattr(video_source, "probe_video_color", lambda path: info)
+    monkeypatch.setattr(video_source, "try_sample_sharp_windows", lambda *args, **kwargs: False)
     commands: list[list[str]] = []
     failures: list[str] = []
 
