@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, TextIO
 
+from .. import gpu_resources
 from ..config import repository_root, sha256_file, stable_hash, write_json_atomic
 from ..models import ExternalCommandError, PipelineError, TrainingRequest, TrainingResult
 from ..prepared import load_current_generation
@@ -193,6 +194,7 @@ class CommandGpuLease(AbstractContextManager["CommandGpuLease"]):
             )
 
     def __enter__(self) -> "CommandGpuLease":
+        gpu_resources.release_inprocess_gpu_resources()
         self._run(self.acquire_command, action="acquire")
         self.acquired = True
         return self
@@ -227,6 +229,7 @@ def gpu_lease_from_info(
 
 class NullGpuLease(AbstractContextManager["NullGpuLease"]):
     def __enter__(self) -> "NullGpuLease":
+        gpu_resources.release_inprocess_gpu_resources()
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
