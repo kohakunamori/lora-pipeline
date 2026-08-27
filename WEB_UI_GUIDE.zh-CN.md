@@ -41,14 +41,21 @@ http://127.0.0.1:7860
 lora-pipeline-web
 ```
 
-## 局域网直接访问
+## 局域网直接访问与认证
 
-Web v1 暂时没有账号登录层，因此默认拒绝监听非 loopback 地址。
+默认只监听 loopback，因此通过 SSH tunnel 使用时可以不配置登录 token。
 
-确定 NAS 所在网络可信时可以显式开启：
+如果希望直接从可信局域网访问，Web 默认要求显式允许 LAN，并配置 access token：
 
 ```bash
+export LORA_WEB_TOKEN='换成你自己的长随机字符串'
 ./lora web --host 0.0.0.0 --port 7860 --allow-lan
+```
+
+也可以直接传入：
+
+```bash
+./lora web --host 0.0.0.0 --port 7860 --allow-lan --token '你的长随机字符串'
 ```
 
 然后访问：
@@ -57,9 +64,19 @@ Web v1 暂时没有账号登录层，因此默认拒绝监听非 loopback 地址
 http://NAS_IP:7860
 ```
 
-更推荐 SSH tunnel；不要把 Web v1 直接映射到公网。
+浏览器会先显示登录页。登录成功后使用 `HttpOnly`、`SameSite=Strict` Cookie 保存会话 token；服务端使用恒定时间比较校验 token。状态修改请求还会额外检查 CSRF token 和同源 `Origin`。
 
-所有写操作带进程级 CSRF token。Dataset、Job 和 Run 文件读取也会校验路径，不能通过 `../` 逃出允许目录。
+如果没有 token，非 loopback 监听会被拒绝。只有明确指定：
+
+```bash
+--unsafe-no-auth
+```
+
+才允许无认证 LAN 模式；不推荐这样做。
+
+如果局域网本身不可信，仍应使用 SSH tunnel，或在前面配置 HTTPS reverse proxy。不要把这个服务直接映射到公网。
+
+Dataset、Job 和 Run 文件读取也会校验路径，不能通过 `../` 逃出允许目录。
 
 ## 数据集
 
@@ -87,6 +104,8 @@ Web 可以：
 - 不删除历史权重和训练结果
 
 日常清洗优先使用“排除”；确认不再需要时才永久删除。
+
+删除整个 Source 时，Web 与 CLI 一样要求再次输入完整 Source ID；删除整个 Dataset 则要求输入 Dataset 名称。
 
 ### 视频导入
 
@@ -145,7 +164,7 @@ web/jobs/
 - `train`
 - `evaluate`
 
-因此关闭浏览器、刷新页面或 SSH 客户端断开，不会让已经启动的 worker 因 HTTP 请求结束而停止。
+因此关闭浏览器、刷新页面、重启 Web 服务或 SSH 客户端断开，不会因为原 HTTP 请求消失而停止已经启动的 detached worker。
 
 V100 只有一张卡，所以 Web 会串行保护 GPU 型任务：已有 GPU Job 运行时，不再启动第二个冲突任务。
 
@@ -163,7 +182,7 @@ Web 可以：
 
 Dataset 与 Config 仍然互不绑定。只有开始一次训练时才同时冻结两个 snapshot。
 
-较少修改的 dedup / identity / caption / review 等工作流开关继续读取 Training Config 已保存值；完整高级编辑仍可使用 CLI。
+较少修改的 dedup / identity / caption / review 等工作流开关继续读取 Training Config 已保存值；完整高级编辑仍可使用 CLI。Web 修改核心训练字段时不会丢掉这些未显示的高级 overrides。
 
 ## 训练状态
 
