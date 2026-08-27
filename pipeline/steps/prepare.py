@@ -18,7 +18,11 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
     raw = project_dir / "raw"
     images = discover_images(raw)
     exclusions_path = project_dir / "review" / "exclusions.yaml"
-    exclusions = set(read_yaml(exclusions_path).get("excluded", [])) if exclusions_path.exists() else set()
+    exclusions = (
+        set(read_yaml(exclusions_path).get("excluded", []))
+        if exclusions_path.exists()
+        else set()
+    )
     generated = project_dir / "review" / "captions" / "generated"
     trigger = str(state.payload["project"]["trigger"])
     project = state.payload["project"]
@@ -38,10 +42,14 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         generated_caption = generated / caption_relative
         raw_caption = image.with_suffix(".txt")
         if generated_caption.is_file():
-            caption_text = generated_caption.read_text(encoding="utf-8", errors="replace").strip()
+            caption_text = generated_caption.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
             caption_source = "caption-step"
         elif raw_caption.is_file():
-            caption_text = raw_caption.read_text(encoding="utf-8", errors="replace").strip()
+            caption_text = raw_caption.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
             caption_source = "existing-passthrough"
         elif allow_fallback:
             caption_text = trigger
@@ -96,8 +104,9 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
     generation_id = manifest_hash
     target = generation_path(project_dir, generation_id)
     manifest_path = target / "manifest.json"
+    reused_generation = target.exists()
 
-    if target.exists():
+    if reused_generation:
         if not manifest_path.is_file():
             raise PipelineError(f"Prepared generation exists without a manifest: {target}")
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -116,7 +125,9 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
                 image_destination.parent.mkdir(parents=True, exist_ok=True)
                 caption_destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(Path(record["source_image"]), image_destination)
-                caption_destination.write_text(str(record["caption_text"]) + "\n", encoding="utf-8")
+                caption_destination.write_text(
+                    str(record["caption_text"]) + "\n", encoding="utf-8"
+                )
             manifest = {
                 **manifest_basis,
                 "manifest_hash": manifest_hash,
@@ -144,9 +155,10 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
             "generation_id": generation_id,
             "generation_path": str(target),
             "current_pointer": str(pointer),
-            "reused_generation": manifest_path.exists(),
+            "reused_generation": reused_generation,
             "trigger_only_captions": sum(
-                record["caption_source"] == "explicit-trigger-only" for record in planned
+                record["caption_source"] == "explicit-trigger-only"
+                for record in planned
             ),
         },
     )
