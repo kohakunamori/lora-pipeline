@@ -12,6 +12,6 @@ if [[ "$#" -eq 0 ]]; then
 fi
 if [[ "$1" == "web" ]]; then
   shift
-  exec "$python" -m pipeline.web_app "$@"
+  exec "$python" -m pipeline.web_full "$@"
 fi
 exec "$python" -m pipeline.cli "$@"
