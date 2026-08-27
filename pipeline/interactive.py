@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 from .i18n import initialize_interactive
-from .interactive_video_character import InteractiveWizard
+from .interactive_video_hdr import InteractiveWizard
 from .tty_compat import configure_interactive_input
 
 
