@@ -1,16 +1,70 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import imagehash
 from PIL import Image, ImageFilter, ImageStat
 
 from .models import PipelineError
+
+
+_PROXY_ENV_NAMES = (
+    "LORA_VIDEO_PROXY",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+)
+_SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+
+
+@dataclass(frozen=True)
+class VideoProxy:
+    """Proxy policy scoped only to yt-dlp video downloads."""
+
+    mode: str = "environment"
+    url: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"environment", "direct", "custom"}:
+            raise PipelineError(f"Unsupported video proxy mode: {self.mode}")
+        if self.mode == "custom":
+            if not self.url:
+                raise PipelineError("Custom video proxy mode requires a proxy URL")
+            validate_proxy_url(self.url)
+
+    def yt_dlp_args(self) -> list[str]:
+        if self.mode == "direct":
+            # yt-dlp documents an empty proxy URL as an explicit direct connection.
+            return ["--proxy", ""]
+        if self.mode == "custom":
+            return ["--proxy", str(self.url)]
+        return []
+
+    def provenance(self) -> dict[str, object]:
+        if self.mode == "custom":
+            return {
+                "mode": self.mode,
+                "configured": True,
+                "endpoint": redact_proxy_url(str(self.url)),
+            }
+        if self.mode == "environment":
+            env_name, env_value = detect_environment_proxy()
+            return {
+                "mode": self.mode,
+                "configured": bool(env_value),
+                "environment_variable": env_name,
+                "endpoint": redact_proxy_url(env_value) if env_value else None,
+            }
+        return {"mode": self.mode, "configured": False, "endpoint": None}
 
 
 @dataclass(frozen=True)
@@ -24,6 +78,7 @@ class VideoFrameReport:
     rejected_exposure: int
     interval_seconds: int
     max_frames: int
+    proxy: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -36,12 +91,51 @@ class VideoFrameReport:
             "rejected_exposure": self.rejected_exposure,
             "interval_seconds": self.interval_seconds,
             "max_frames": self.max_frames,
+            "proxy": self.proxy,
         }
 
 
 def is_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def detect_environment_proxy() -> tuple[str | None, str | None]:
+    for name in _PROXY_ENV_NAMES:
+        value = os.environ.get(name)
+        if value:
+            return name, value
+    return None, None
+
+
+def validate_proxy_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in _SUPPORTED_PROXY_SCHEMES or not parsed.hostname:
+        schemes = ", ".join(sorted(_SUPPORTED_PROXY_SCHEMES))
+        raise PipelineError(f"Proxy URL must use one of {schemes} and include a host")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise PipelineError("Proxy port must be a valid number between 1 and 65535") from exc
+    if port is not None and not (1 <= port <= 65535):
+        raise PipelineError("Proxy port must be between 1 and 65535")
+
+
+def redact_proxy_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return "configured"
+    hostname = parsed.hostname or ""
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return f"{parsed.scheme}://{host}:configured-port"
+    if port is not None:
+        host = f"{host}:{port}"
+    return urlunparse((parsed.scheme, host, parsed.path, "", "", ""))
 
 
 def require_video_tools(*, remote: bool) -> None:
@@ -64,6 +158,7 @@ def extract_video_frames(
     max_frames: int = 250,
     phash_distance: int = 7,
     blur_threshold: float = 55.0,
+    proxy: VideoProxy | None = None,
 ) -> VideoFrameReport:
     if interval_seconds < 1:
         raise PipelineError("Frame interval must be at least 1 second")
@@ -76,10 +171,11 @@ def extract_video_frames(
     require_video_tools(remote=remote)
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    proxy = proxy or VideoProxy(mode="environment")
 
     with tempfile.TemporaryDirectory(prefix="lora-video-") as temporary:
         temporary_dir = Path(temporary)
-        video_path = _resolve_video(source, temporary_dir, remote=remote)
+        video_path = _resolve_video(source, temporary_dir, remote=remote, proxy=proxy)
         candidate_dir = temporary_dir / "frames"
         candidate_dir.mkdir()
         # Sample more candidates than the final cap because filtering can reject many.
@@ -134,10 +230,17 @@ def extract_video_frames(
             rejected_exposure=exposure,
             interval_seconds=interval_seconds,
             max_frames=max_frames,
+            proxy=proxy.provenance() if remote else None,
         )
 
 
-def _resolve_video(source: str, temporary_dir: Path, *, remote: bool) -> Path:
+def _resolve_video(
+    source: str,
+    temporary_dir: Path,
+    *,
+    remote: bool,
+    proxy: VideoProxy,
+) -> Path:
     if not remote:
         path = Path(source).expanduser().resolve()
         if not path.is_file():
@@ -149,6 +252,7 @@ def _resolve_video(source: str, temporary_dir: Path, *, remote: bool) -> Path:
         "yt-dlp",
         "--no-playlist",
         "--no-progress",
+        *proxy.yt_dlp_args(),
         "-f",
         "bestvideo[height<=1080]/best[height<=1080]",
         "-o",
