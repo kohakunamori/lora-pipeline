@@ -18,6 +18,14 @@ def _pattern(path: Path, *, inverse: bool = False) -> None:
     image.save(path)
 
 
+def _cookies(path: Path) -> None:
+    path.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\ttest-secret\n",
+        encoding="utf-8",
+    )
+
+
 def test_extract_video_frames_filters_near_duplicates(tmp_path, monkeypatch) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"placeholder")
@@ -27,7 +35,7 @@ def test_extract_video_frames_filters_near_duplicates(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(
         video_source,
         "_resolve_video",
-        lambda source, temporary_dir, remote, proxy: Path(source),
+        lambda source, temporary_dir, remote, proxy, auth: Path(source),
     )
 
     def fake_sample(video_path, output_dir, *, interval_seconds, frame_cap):
@@ -51,6 +59,7 @@ def test_extract_video_frames_filters_near_duplicates(tmp_path, monkeypatch) -> 
     assert report.accepted_frames == 2
     assert report.rejected_near_duplicate == 1
     assert report.proxy is None
+    assert report.authentication is None
     assert len(list(output.glob("*.jpg"))) == 2
 
 
@@ -115,3 +124,59 @@ def test_environment_proxy_prefers_lora_specific_override(monkeypatch) -> None:
 def test_proxy_validation_rejects_unsupported_scheme() -> None:
     with pytest.raises(PipelineError, match="Proxy URL"):
         video_source.VideoProxy(mode="custom", url="ftp://127.0.0.1:21")
+
+
+def test_cookie_auth_passes_file_to_ytdlp_without_persisting_path(tmp_path) -> None:
+    cookie_file = tmp_path / "private" / "youtube-cookies.txt"
+    cookie_file.parent.mkdir()
+    _cookies(cookie_file)
+
+    auth = video_source.VideoAuth(mode="cookies", cookies_path=str(cookie_file))
+
+    assert auth.yt_dlp_args() == ["--cookies", str(cookie_file.resolve())]
+    assert auth.provenance() == {
+        "mode": "cookies_file",
+        "configured": True,
+        "filename": "youtube-cookies.txt",
+    }
+    assert str(cookie_file.parent) not in str(auth.provenance())
+    assert "test-secret" not in str(auth.provenance())
+
+
+def test_cookie_auth_rejects_non_netscape_file(tmp_path) -> None:
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("youtube.com=secret\n", encoding="utf-8")
+
+    with pytest.raises(PipelineError, match="Netscape/Mozilla"):
+        video_source.VideoAuth(mode="cookies", cookies_path=str(cookie_file))
+
+
+def test_cookie_auth_rejects_file_without_youtube_cookie(tmp_path) -> None:
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".example.com\tTRUE\t/\tTRUE\t2147483647\tSID\ttest\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PipelineError, match="no youtube.com cookies"):
+        video_source.VideoAuth(mode="cookies", cookies_path=str(cookie_file))
+
+
+def test_detect_cookies_file_prefers_environment_override(tmp_path, monkeypatch) -> None:
+    env_cookie = tmp_path / "env-cookies.txt"
+    _cookies(env_cookie)
+    default_cookie = tmp_path / "default-cookies.txt"
+    _cookies(default_cookie)
+    monkeypatch.setattr(video_source, "_DEFAULT_COOKIES_PATH", default_cookie)
+    monkeypatch.setenv("LORA_VIDEO_COOKIES", str(env_cookie))
+
+    source, path = video_source.detect_cookies_file()
+
+    assert source == "LORA_VIDEO_COOKIES"
+    assert path == env_cookie.resolve()
+
+
+def test_no_browser_cookie_auth_mode_is_exposed() -> None:
+    with pytest.raises(PipelineError, match="Unsupported video authentication mode"):
+        video_source.VideoAuth(mode="browser", cookies_path="chrome")
