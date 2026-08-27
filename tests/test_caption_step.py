@@ -6,7 +6,9 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline.dataset.tagger import DualTagger, TagResult, TaggerBackend
+from pipeline.prepared import load_current_generation
 from pipeline.state import ProjectState
+from pipeline.steps import prepare
 from pipeline.steps.caption import run
 
 
@@ -63,7 +65,7 @@ def test_dual_tagger_conflicts_are_preserved_for_review(tmp_path) -> None:
     assert result.details["dual_tagger_conflict_images"] == 1
 
 
-def test_existing_passthrough_preserves_caption_bytes(tmp_path) -> None:
+def test_existing_passthrough_preserves_caption_bytes_through_prepare(tmp_path) -> None:
     state = _state(tmp_path)
     source = state.project_dir / "raw" / "sample.txt"
     original = b"MyTrigger, Blue_Hair, Mixed CASE\nsecond line\n"
@@ -73,6 +75,11 @@ def test_existing_passthrough_preserves_caption_bytes(tmp_path) -> None:
     destination = Path(manifest["records"][0]["caption"])
     assert destination.read_bytes() == original
     assert manifest["records"][0]["mode"] == "existing_passthrough"
+
+    prepare.run(state)
+    generation = load_current_generation(state.project_dir)
+    prepared_caption = generation.root / generation.manifest["images"][0]["caption"]
+    assert prepared_caption.read_bytes() == original
 
 
 def test_tagger_cache_is_content_addressed_per_image(tmp_path) -> None:
