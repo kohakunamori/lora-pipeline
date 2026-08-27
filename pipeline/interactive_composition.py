@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 
 from rich.table import Table
 
 from .dataset.image_info import discover_images
-from .dataset_metadata import composition_summary
+from .dataset_metadata import (
+    composition_summary,
+    import_composition_records,
+    seed_source_defaults,
+)
 from .dataset_workspace import DatasetWorkspace
 from .interactive_deletion import InteractiveWizard as BaseInteractiveWizard
 from .video_character import VideoSubjectReport
@@ -37,6 +43,65 @@ class InteractiveWizard(BaseInteractiveWizard):
             "selected_frames": len(discover_images(output_dir)),
         }
         return output_dir, payload
+
+    def _import_video_source(self, workspace: DatasetWorkspace, *, remote: bool) -> None:
+        """Import a video source and persist its composition manifest before temp cleanup."""
+
+        source = self._ask_remote_video_url() if remote else self._ask_local_video_file()
+        interval_seconds = self._ask_positive_int("Sample one frame every N seconds", default=2)
+        self._video_interval_seconds = interval_seconds
+        max_frames = self._ask_positive_int(
+            "Maximum accepted frames before identity selection",
+            default=250,
+        )
+        proxy = self._select_video_proxy(source)
+        work_root = workspace.dataset_dir / "cache" / "work"
+        work_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="video-source-", dir=work_root) as temporary:
+            frame_dir = Path(temporary) / "frames"
+            report, _proxy = self._extract_video_with_retry(
+                source,
+                frame_dir,
+                interval_seconds=interval_seconds,
+                max_frames=max_frames,
+                proxy=proxy,
+            )
+            self._render_video_report(report.as_dict())
+            training_dir, identity = self._select_video_identity(frame_dir)
+            processing = report.as_dict()
+            processing.pop("downloaded_video", None)
+            processing["identity_preselection"] = identity
+            processing["source_kind"] = "remote_url" if remote else "local_video"
+            default_label = "online-video" if remote else Path(source).stem
+            label = self._ask_text(
+                self._b("来源名称", "Source label"),
+                default=default_label or "video",
+            ).strip()
+            record = workspace.add_source_from_directory(
+                training_dir,
+                kind="remote_video" if remote else "local_video",
+                label=label,
+                origin=source,
+                processing=processing,
+            )
+            source_id = str(record["id"])
+            manifest_path = training_dir / "composition-manifest.json"
+            if manifest_path.is_file():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                records = manifest.get("images", []) if isinstance(manifest, dict) else []
+                import_composition_records(
+                    workspace,
+                    source_id,
+                    records if isinstance(records, list) else [],
+                    selected_cluster=(
+                        int(identity["selected_cluster"])
+                        if identity.get("selected_cluster") is not None
+                        else None
+                    ),
+                )
+            else:
+                seed_source_defaults(workspace, source_id)
+        self._render_source_imported(record)
 
     def _render_composition_report(self, report: EnrichedVideoCompositionReport) -> None:
         payload = report.as_dict()
