@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from .wizard import Wizard
+from .interactive_app import InteractiveWizard
 
 
 def main() -> None:
@@ -11,7 +11,7 @@ def main() -> None:
 
         cli_main()
         return
-    Wizard().home()
+    InteractiveWizard().home()
 
 
 if __name__ == "__main__":
