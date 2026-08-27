@@ -23,60 +23,18 @@ class InteractiveWizard(BaseInteractiveWizard):
             action = self._menu(
                 self._b("数据集操作", "Dataset actions"),
                 [
+                    MenuItem("import", self._b("导入新的数据来源", "Import a new data source")),
+                    MenuItem("sources", self._b("按来源管理", "Manage by source")),
+                    MenuItem("audit", self._b("全数据集自动检查", "Audit the whole dataset")),
+                    MenuItem("tag", self._b("自动打 Tag", "Auto-tag images")),
+                    MenuItem("review", self._b("人工图片审核 / 排除", "Manual image review / exclusions")),
+                    MenuItem("edit_tags", self._b("人工修改 Tag", "Edit tags manually")),
                     MenuItem(
-                        "import",
-                        self._b("导入新的数据来源", "Import a new data source"),
+                        "training",
+                        self._b("用此数据集开始训练", "Start training with this dataset"),
                         self._b(
-                            "图片目录、本地视频或在线视频会作为独立来源保存。",
-                            "Image folders and videos are stored as separate sources.",
-                        ),
-                    ),
-                    MenuItem(
-                        "sources",
-                        self._b("按来源管理", "Manage by source"),
-                        self._b(
-                            "启用/停用、单来源裁切、清洗、Tag、人工排除。",
-                            "Enable/disable, crop, curate, tag, and review one source.",
-                        ),
-                    ),
-                    MenuItem(
-                        "audit",
-                        self._b("全数据集自动检查", "Audit the whole dataset"),
-                        self._b(
-                            "安全排除损坏文件和完全重复副本；其余只标记。",
-                            "Safely exclude corrupt/exact duplicates; flag the rest for review.",
-                        ),
-                    ),
-                    MenuItem(
-                        "tag",
-                        self._b("自动打 Tag", "Auto-tag images"),
-                        self._b(
-                            "使用现有 DeepGHS/WD Tagger，已有人工 Tag 默认不覆盖。",
-                            "Use the existing WD tagger; manual captions are preserved by default.",
-                        ),
-                    ),
-                    MenuItem(
-                        "review",
-                        self._b("人工图片审核 / 排除", "Manual image review / exclusions"),
-                        self._b(
-                            "按编号或范围快速排除，可随时恢复。",
-                            "Exclude by number/range and restore at any time.",
-                        ),
-                    ),
-                    MenuItem(
-                        "edit_tags",
-                        self._b("人工修改 Tag", "Edit tags manually"),
-                        self._b(
-                            "逐图片替换、追加或删除 Tag。",
-                            "Replace, add, or remove tags for individual images.",
-                        ),
-                    ),
-                    MenuItem(
-                        "project",
-                        self._b("用这个数据集创建训练项目", "Create training project from this dataset"),
-                        self._b(
-                            "冻结当前启用且未排除的图片。",
-                            "Freeze enabled, non-excluded images into a project snapshot.",
+                            "转到训练状态：再选择一份训练配置，并同时冻结两个快照。",
+                            "Go through Training Status, select a config, and freeze both snapshots together.",
                         ),
                     ),
                     MenuItem(
@@ -105,8 +63,8 @@ class InteractiveWizard(BaseInteractiveWizard):
                 self._review_dataset_items(workspace)
             elif action == "edit_tags":
                 self._choose_and_edit_tag(workspace)
-            elif action == "project":
-                self._create_project_from_dataset_interactive(workspace=workspace)
+            elif action == "training":
+                self._start_training_from_dataset_config(prefilled_workspace=workspace)
             elif action == "delete":
                 if self._dataset_delete_menu(workspace):
                     return
@@ -141,9 +99,7 @@ class InteractiveWizard(BaseInteractiveWizard):
                     )
                 )
             if workspace.sources:
-                actions.append(
-                    MenuItem("source", self._b("删除整个来源", "Delete an entire source"))
-                )
+                actions.append(MenuItem("source", self._b("删除整个来源", "Delete an entire source")))
             actions.extend(
                 [
                     MenuItem(
@@ -229,7 +185,10 @@ class InteractiveWizard(BaseInteractiveWizard):
             )
         )
         if not self._confirm(
-            self._b("永久删除这个来源及其 Dataset 副本？", "Permanently delete this source and its Dataset copies?"),
+            self._b(
+                "永久删除这个来源及其 Dataset 副本？",
+                "Permanently delete this source and its Dataset copies?",
+            ),
             default=False,
         ):
             return
@@ -240,7 +199,12 @@ class InteractiveWizard(BaseInteractiveWizard):
             )
         ).strip()
         if typed != source_id:
-            self.console.print(self._b("[yellow]确认不匹配，已取消。[/yellow]", "[yellow]Confirmation did not match; cancelled.[/yellow]"))
+            self.console.print(
+                self._b(
+                    "[yellow]确认不匹配，已取消。[/yellow]",
+                    "[yellow]Confirmation did not match; cancelled.[/yellow]",
+                )
+            )
             return
         result = delete_dataset_source(workspace, source_id)
         self.console.print(
@@ -270,7 +234,12 @@ class InteractiveWizard(BaseInteractiveWizard):
                 include_excluded=True,
             )
             if not items:
-                self.console.print(self._b("[yellow]这个来源已经没有图片。[/yellow]", "[yellow]This source has no images left.[/yellow]"))
+                self.console.print(
+                    self._b(
+                        "[yellow]这个来源已经没有图片。[/yellow]",
+                        "[yellow]This source has no images left.[/yellow]",
+                    )
+                )
                 return
             page_count = max(1, (len(items) + page_size - 1) // page_size)
             page = min(page, page_count - 1)
@@ -298,7 +267,10 @@ class InteractiveWizard(BaseInteractiveWizard):
             self.console.print(table)
 
             actions = [
-                MenuItem("delete", self._b("按编号/范围永久删除", "Permanently delete by number/range"))
+                MenuItem(
+                    "delete",
+                    self._b("按编号/范围永久删除", "Permanently delete by number/range"),
+                )
             ]
             if page > 0:
                 actions.append(MenuItem("prev", self._b("上一页", "Previous page")))
@@ -370,7 +342,10 @@ class InteractiveWizard(BaseInteractiveWizard):
             )
         )
         if not self._confirm(
-            self._b("永久删除整个 Dataset 工作区？", "Permanently delete the entire Dataset workspace?"),
+            self._b(
+                "永久删除整个 Dataset 工作区？",
+                "Permanently delete the entire Dataset workspace?",
+            ),
             default=False,
         ):
             return False
@@ -381,7 +356,12 @@ class InteractiveWizard(BaseInteractiveWizard):
             )
         ).strip()
         if typed != workspace.name:
-            self.console.print(self._b("[yellow]确认不匹配，已取消。[/yellow]", "[yellow]Confirmation did not match; cancelled.[/yellow]"))
+            self.console.print(
+                self._b(
+                    "[yellow]确认不匹配，已取消。[/yellow]",
+                    "[yellow]Confirmation did not match; cancelled.[/yellow]",
+                )
+            )
             return False
         result = delete_dataset_workspace(workspace)
         self.console.print(
