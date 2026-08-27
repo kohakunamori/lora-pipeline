@@ -58,7 +58,12 @@ def resolve_base_sha256(
     full: bool = False,
     persist: bool = True,
 ) -> tuple[str, bool, dict[str, int]]:
-    """Return checkpoint SHA256 and whether a matching stat cache was reused."""
+    """Return checkpoint SHA256 and whether a matching stat cache was reused.
+
+    A registered digest is an identity assertion, not a mutable cache. If file
+    content changes, this function returns the new digest but never overwrites
+    the registered identity; the caller can block and require explicit review.
+    """
 
     root = root or repository_root()
     registry_path = root / "bases" / "registry.yaml"
@@ -71,15 +76,22 @@ def resolve_base_sha256(
     if not path.is_file():
         raise PipelineError(f"Checkpoint does not exist: {path}")
     signature = checkpoint_stat_signature(path)
-    cached_sha = item.get("sha256")
+    registered_sha = item.get("sha256")
     cached_stat = item.get("sha256_stat")
-    if not full and cached_sha and cached_stat == signature:
-        return str(cached_sha), True, signature
+    if not full and registered_sha and cached_stat == signature:
+        return str(registered_sha), True, signature
     digest = sha256_file(path)
     if persist:
-        item["sha256"] = digest
-        item["sha256_stat"] = signature
-        write_yaml_atomic(registry_path, payload)
+        changed = False
+        if not registered_sha:
+            item["sha256"] = digest
+            item["sha256_stat"] = signature
+            changed = True
+        elif digest == registered_sha and cached_stat != signature:
+            item["sha256_stat"] = signature
+            changed = True
+        if changed:
+            write_yaml_atomic(registry_path, payload)
     return digest, False, signature
 
 
