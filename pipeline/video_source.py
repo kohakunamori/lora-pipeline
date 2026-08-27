@@ -29,6 +29,7 @@ _SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "soc
 _COOKIES_ENV_NAME = "LORA_VIDEO_COOKIES"
 _DEFAULT_COOKIES_PATH = Path("~/.config/lora-pipeline/youtube-cookies.txt").expanduser()
 _NETSCAPE_COOKIE_HEADERS = {"# HTTP Cookie File", "# Netscape HTTP Cookie File"}
+_REMOTE_VIDEO_MAX_HEIGHT = 2160
 # yt-dlp issue #17389 (Aug 2026): logged-in cookie downloads may select
 # tv_downgraded and fail with "The page needs to be reloaded". Upstream's
 # current workaround is to use default + web_embedded for cookie-auth requests.
@@ -243,7 +244,7 @@ def extract_video_frames(
     *,
     interval_seconds: int = 2,
     max_frames: int = 250,
-    phash_distance: int = 7,
+    phash_distance: int = 2,
     blur_threshold: float = 55.0,
     proxy: VideoProxy | None = None,
     auth: VideoAuth | None = None,
@@ -306,7 +307,8 @@ def extract_video_frames(
                 if any(fingerprint - previous <= phash_distance for previous in accepted_hashes):
                     duplicates += 1
                     continue
-                target = output_dir / f"video-{accepted + 1:05d}.jpg"
+                candidate_index = _frame_index(candidate, fallback=accepted + 1)
+                target = output_dir / f"video-{candidate_index:06d}.jpg"
                 image.save(target, quality=95, subsampling=0)
                 accepted_hashes.append(fingerprint)
                 accepted += 1
@@ -360,7 +362,10 @@ def _resolve_video(
         *auth.yt_dlp_args(),
         *youtube_cookie_compat,
         "-f",
-        "bestvideo[height<=1080]/best[height<=1080]",
+        (
+            f"bestvideo[height<={_REMOTE_VIDEO_MAX_HEIGHT}]/"
+            f"best[height<={_REMOTE_VIDEO_MAX_HEIGHT}]/bestvideo/best"
+        ),
         "-o",
         str(output_template),
         source,
@@ -395,6 +400,14 @@ def _sample_frames(
         str(output_dir / "frame-%06d.jpg"),
     ]
     _run(command, "ffmpeg could not extract frames from the video")
+
+
+def _frame_index(path: Path, *, fallback: int) -> int:
+    try:
+        value = int(path.stem.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return fallback
+    return value if value >= 1 else fallback
 
 
 def _sharpness_score(image: Image.Image) -> float:
