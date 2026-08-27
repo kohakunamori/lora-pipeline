@@ -29,6 +29,13 @@ _SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "soc
 _COOKIES_ENV_NAME = "LORA_VIDEO_COOKIES"
 _DEFAULT_COOKIES_PATH = Path("~/.config/lora-pipeline/youtube-cookies.txt").expanduser()
 _NETSCAPE_COOKIE_HEADERS = {"# HTTP Cookie File", "# Netscape HTTP Cookie File"}
+# yt-dlp issue #17389 (Aug 2026): logged-in cookie downloads may select
+# tv_downgraded and fail with "The page needs to be reloaded". Upstream's
+# current workaround is to use default + web_embedded for cookie-auth requests.
+_YOUTUBE_COOKIE_PLAYER_CLIENT_ARGS = (
+    "--extractor-args",
+    "youtube:player_client=default,web_embedded",
+)
 
 
 @dataclass(frozen=True)
@@ -141,6 +148,12 @@ class VideoFrameReport:
 def is_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def is_youtube_url(value: str) -> bool:
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
 
 
 def detect_environment_proxy() -> tuple[str | None, str | None]:
@@ -332,6 +345,11 @@ def _resolve_video(
         return path
 
     output_template = temporary_dir / "source.%(ext)s"
+    youtube_cookie_compat = (
+        _YOUTUBE_COOKIE_PLAYER_CLIENT_ARGS
+        if auth.mode == "cookies" and is_youtube_url(source)
+        else ()
+    )
     command = [
         sys.executable,
         "-m",
@@ -340,6 +358,7 @@ def _resolve_video(
         "--no-progress",
         *proxy.yt_dlp_args(),
         *auth.yt_dlp_args(),
+        *youtube_cookie_compat,
         "-f",
         "bestvideo[height<=1080]/best[height<=1080]",
         "-o",
