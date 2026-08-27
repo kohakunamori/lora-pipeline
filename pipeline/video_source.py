@@ -113,7 +113,11 @@ def validate_proxy_url(value: str) -> None:
     if parsed.scheme.lower() not in _SUPPORTED_PROXY_SCHEMES or not parsed.hostname:
         schemes = ", ".join(sorted(_SUPPORTED_PROXY_SCHEMES))
         raise PipelineError(f"Proxy URL must use one of {schemes} and include a host")
-    if parsed.port is not None and not (1 <= parsed.port <= 65535):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise PipelineError("Proxy port must be a valid number between 1 and 65535") from exc
+    if port is not None and not (1 <= port <= 65535):
         raise PipelineError("Proxy port must be between 1 and 65535")
 
 
@@ -125,8 +129,12 @@ def redact_proxy_url(value: str | None) -> str | None:
         return "configured"
     hostname = parsed.hostname or ""
     host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
-    if parsed.port is not None:
-        host = f"{host}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError:
+        return f"{parsed.scheme}://{host}:configured-port"
+    if port is not None:
+        host = f"{host}:{port}"
     return urlunparse((parsed.scheme, host, parsed.path, "", "", ""))
 
 
