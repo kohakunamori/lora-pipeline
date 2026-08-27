@@ -31,3 +31,4 @@ toml==0.10.2
 transformers==4.54.1
 typer==0.21.1
 voluptuous==0.15.2
+yt-dlp==2026.8.19
