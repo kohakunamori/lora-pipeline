@@ -41,7 +41,13 @@ evaluation:
   identity: true
   leakage: true
   cross_content: true
+  subject_prompt: 1girl
   strengths: [0.4, 0.6, 0.8, 1.0]
+  screening_strengths: [0.6, 0.8, 1.0]
+  screening_prompts:
+    - portrait
+    - full body
+    - different outfit
   prompts:
     - portrait
     - upper body
