@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .web_entry import FinalHandler as FullHandler
-from .web_entry import main, make_server, serve
+from .web_batch_tags import FinalHandler as FullHandler
+from .web_batch_tags import main, make_server, serve
 
 __all__ = ["FullHandler", "make_server", "serve", "main"]
 
