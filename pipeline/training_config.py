@@ -238,6 +238,16 @@ class TrainingConfig:
             }
         return deep_merge(target_defaults, self.overrides)
 
+    def effective_evaluation(self) -> dict[str, Any]:
+        """Resolve the run-time evaluation subject for the selected training target."""
+
+        result = copy.deepcopy(self.evaluation)
+        if self.target_type == "character_outfit":
+            subject = str(result.get("subject_prompt") or "1girl")
+            subject_tags = parse_anchor_tags([subject, *self.anchor_tags])
+            result["subject_prompt"] = ", ".join(subject_tags)
+        return result
+
     def _normalize(self) -> None:
         self.payload.setdefault("schema_version", 1)
         data = self.payload.setdefault("config", {})
@@ -389,7 +399,7 @@ def create_project_from_training_config(
     project["training_target_type"] = config.target_type
     project["caption_anchor_tags"] = config.anchor_tags
     project["overrides"] = config.runtime_overrides()
-    project["evaluation"] = copy.deepcopy(config.evaluation)
+    project["evaluation"] = config.effective_evaluation()
 
     workflow = copy.deepcopy(config.workflow)
     if workflow.get("caption_mode") == "auto":
