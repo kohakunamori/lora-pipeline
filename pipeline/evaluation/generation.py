@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
@@ -42,30 +43,51 @@ class SdScriptsGenerator(GenerationBackend):
     ) -> list[GeneratedImage]:
         if not cases:
             return []
-        info = json.loads((self.root / "environment" / "environment-info.json").read_text(encoding="utf-8"))
+        case_ids = [case.case_id for case in cases]
+        if len(case_ids) != len(set(case_ids)):
+            raise PipelineError("Evaluation case IDs must be unique")
+        info = json.loads(
+            (self.root / "environment" / "environment-info.json").read_text(encoding="utf-8")
+        )
         python = Path(info["python_path"])
         sd_scripts = Path(info["sd_scripts_path"])
         entrypoint = sd_scripts / "sdxl_gen_img.py"
         if not python.exists() or not entrypoint.exists():
             raise PipelineError("The validated sd-scripts generation environment is unavailable")
         output_dir.mkdir(parents=True, exist_ok=True)
-        logs = output_dir.parent / "logs"
+        cases_dir = output_dir / "cases"
+        cases_dir.mkdir(parents=True, exist_ok=True)
+        logs = output_dir.parent.parent / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         groups: dict[Path, list[GenerationCase]] = defaultdict(list)
         for case in cases:
             groups[case.checkpoint].append(case)
         generated: list[GeneratedImage] = []
-        summary_log = logs / "generation.log"
+        summary_log = logs / f"generation-{output_dir.name}.log"
         summary_log.write_text("", encoding="utf-8")
         lease = gpu_lease_from_info(info, enabled=self.use_gpu_lease)
         with lease:
-            for index, (checkpoint, checkpoint_cases) in enumerate(groups.items(), start=1):
-                checkpoint_dir = output_dir / f"{index:02d}-{_slug(checkpoint.stem)}"
+            for group_index, (checkpoint, checkpoint_cases) in enumerate(groups.items(), start=1):
+                checkpoint_dir = output_dir / "work" / f"{group_index:02d}-{_slug(checkpoint.stem)}"
+                if checkpoint_dir.exists():
+                    shutil.rmtree(checkpoint_dir)
                 checkpoint_dir.mkdir(parents=True, exist_ok=True)
                 prompt_file = checkpoint_dir / "prompts.txt"
                 prompt_file.write_text(
                     "\n".join(_prompt_line(case) for case in checkpoint_cases) + "\n",
                     encoding="utf-8",
+                )
+                index_manifest = [
+                    {
+                        "sequence": index,
+                        "expected_filename": f"im_{index:06d}.png",
+                        "case_id": case.case_id,
+                    }
+                    for index, case in enumerate(checkpoint_cases, start=1)
+                ]
+                write_json_atomic(
+                    checkpoint_dir / "case-index.json",
+                    {"schema_version": 1, "cases": index_manifest},
                 )
                 command = [
                     str(python),
@@ -106,12 +128,16 @@ class SdScriptsGenerator(GenerationBackend):
                 environment.update(
                     {
                         "HF_HOME": str(self.root / ".cache" / "huggingface"),
-                        "HUGGINGFACE_HUB_CACHE": str(self.root / ".cache" / "huggingface" / "hub"),
-                        "TRANSFORMERS_CACHE": str(self.root / ".cache" / "huggingface" / "transformers"),
+                        "HUGGINGFACE_HUB_CACHE": str(
+                            self.root / ".cache" / "huggingface" / "hub"
+                        ),
+                        "TRANSFORMERS_CACHE": str(
+                            self.root / ".cache" / "huggingface" / "transformers"
+                        ),
                         "PYTHONUNBUFFERED": "1",
                     }
                 )
-                log_path = logs / f"generation-{index:02d}.log"
+                log_path = logs / f"generation-{output_dir.name}-{group_index:02d}.log"
                 exit_code = run_command_tee(
                     command,
                     cwd=sd_scripts,
@@ -120,29 +146,41 @@ class SdScriptsGenerator(GenerationBackend):
                     verbose=verbose,
                 )
                 with summary_log.open("a", encoding="utf-8") as summary:
-                    summary.write(f"checkpoint={checkpoint} exit_code={exit_code} log={log_path}\n")
+                    summary.write(
+                        f"checkpoint={checkpoint} exit_code={exit_code} log={log_path}\n"
+                    )
                 if exit_code:
                     raise ExternalCommandError(
                         f"Image generation failed for {checkpoint.name}",
                         exit_code=exit_code,
                         log_path=log_path,
                     )
-                images = sorted(
-                    (path for path in checkpoint_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}),
-                    key=lambda path: path.name,
-                )
-                if len(images) != len(checkpoint_cases):
+
+                actual_images = {
+                    path.name: path
+                    for path in checkpoint_dir.iterdir()
+                    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                }
+                expected_names = {item["expected_filename"] for item in index_manifest}
+                missing = sorted(expected_names - actual_images.keys())
+                unexpected = sorted(actual_images.keys() - expected_names)
+                if missing or unexpected:
                     raise ExternalCommandError(
-                        f"Generation produced {len(images)} image(s), expected {len(checkpoint_cases)}",
+                        "Generation sequence manifest mismatch for "
+                        f"{checkpoint.name}: missing={missing}, unexpected={unexpected}",
                         exit_code=1,
                         log_path=log_path,
                     )
-                generated.extend(
-                    GeneratedImage(case=case, path=image)
-                    for case, image in zip(checkpoint_cases, images, strict=True)
-                )
+                for index, case in enumerate(checkpoint_cases, start=1):
+                    expected = actual_images[f"im_{index:06d}.png"]
+                    destination = cases_dir / f"{case.case_id}.png"
+                    destination.unlink(missing_ok=True)
+                    os.replace(expected, destination)
+                    generated.append(GeneratedImage(case=case, path=destination))
+
         manifest = [
             {
+                "case_id": item.case.case_id,
                 "path": str(item.path),
                 "checkpoint": str(item.case.checkpoint),
                 "checkpoint_label": item.case.checkpoint_label,
@@ -155,7 +193,10 @@ class SdScriptsGenerator(GenerationBackend):
             }
             for item in generated
         ]
-        write_json_atomic(output_dir / "generation-manifest.json", {"schema_version": 1, "images": manifest})
+        write_json_atomic(
+            output_dir / "generation-manifest.json",
+            {"schema_version": 2, "images": manifest},
+        )
         return generated
 
 
@@ -167,5 +208,7 @@ def _prompt_line(case: GenerationCase) -> str:
 
 
 def _slug(value: str) -> str:
-    cleaned = "".join(character if character.isalnum() or character in "-_" else "-" for character in value)
+    cleaned = "".join(
+        character if character.isalnum() or character in "-_" else "-" for character in value
+    )
     return cleaned[:60] or "checkpoint"
