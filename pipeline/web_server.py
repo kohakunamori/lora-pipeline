@@ -6,22 +6,16 @@ import os
 from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from .models import PipelineError
 from .training_config import TrainingConfig
 from .web_app import _page, _q
-from .web_routes import FullHandler
+from .web_safety import FullHandler as SafetyHandler
 
 
-class SecureHandler(FullHandler):
-    """Production entry handler: FullHandler plus optional token authentication.
-
-    The base Web UI intentionally remains framework-free. This thin layer keeps
-    authentication and non-loopback exposure policy separate from the page/routes
-    implementation so CLI/local tests can still exercise the same domain logic.
-    """
+class SecureHandler(SafetyHandler):
+    """Final Web handler with optional token auth and override-safe config edits."""
 
     def do_GET(self) -> None:  # noqa: N802
         try:
