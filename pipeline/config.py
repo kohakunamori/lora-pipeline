@@ -166,11 +166,22 @@ def validate_safety(
         raise ConfigurationError(f"Resolution {resolution} exceeds the validated V1 default envelope")
     if max_area > hardware_area:
         raise ConfigurationError(f"Bucket area {max_area} exceeds hardware limit {hardware_area}")
-    batch_size = int(merged.get("training", {}).get("batch_size", 1))
-    batch_limit = int(hardware.get("limits", {}).get("max_physical_batch_1024", 1))
-    if batch_size > batch_limit:
-        raise ConfigurationError(f"Physical batch {batch_size} exceeds validated limit {batch_limit}")
-    cached = bool(merged.get("training", {}).get("cache_text_encoder_outputs", False))
+
+    training_values = merged.get("training", {})
+    batch_size = int(training_values.get("batch_size", 1))
+    accumulation = int(training_values.get("gradient_accumulation_steps", 1))
+    if batch_size < 1:
+        raise ConfigurationError("Physical batch must be at least 1")
+    if accumulation < 1:
+        raise ConfigurationError("Gradient accumulation must be at least 1")
+    if int(training_values.get("network_dim", 16)) < 1:
+        raise ConfigurationError("LoRA network_dim must be at least 1")
+    if int(training_values.get("network_alpha", 8)) < 1:
+        raise ConfigurationError("LoRA network_alpha must be at least 1")
+    if float(training_values.get("unet_lr", 0.0001)) <= 0:
+        raise ConfigurationError("UNet learning rate must be positive")
+
+    cached = bool(training_values.get("cache_text_encoder_outputs", False))
     if cached:
         incompatible = {
             "shuffle_caption": merged.get("caption", {}).get("shuffle", False),
@@ -183,5 +194,5 @@ def validate_safety(
             raise ConfigurationError(
                 "Text-encoder output caching is incompatible with: " + ", ".join(enabled)
             )
-        if not merged.get("training", {}).get("network_train_unet_only", False):
+        if not training_values.get("network_train_unet_only", False):
             raise ConfigurationError("Text-encoder output caching requires U-Net-only network training")

@@ -35,5 +35,5 @@ storage:
   # Set this to a local SSD/NVMe path on the NAS only after validating it.
   scratch_root: null
 
-limits:
-  max_physical_batch_1024: 2
+# Physical batch is intentionally not capped here. Presets remain conservative,
+# while user overrides are allowed to use any positive batch that fits real VRAM.
