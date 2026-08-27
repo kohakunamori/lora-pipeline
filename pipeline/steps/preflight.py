@@ -9,8 +9,16 @@ from typing import Any
 
 from ..bases import resolve_base_sha256
 from ..budget import resolve_budget
-from ..config import load_base_registry, read_yaml, repository_root, stable_hash, write_json_atomic
-from ..dataset.image_info import discover_images
+from ..config import (
+    load_base_registry,
+    read_yaml,
+    repository_root,
+    resolve_profiles,
+    sha256_file,
+    stable_hash,
+    write_json_atomic,
+)
+from ..dataset.image_info import inspect_dataset
 from ..models import PipelineError, StepResult
 from ..prepared import load_current_generation
 from ..state import ProjectState
@@ -25,7 +33,7 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     if base_id not in registry:
         raise PipelineError(f"Base model is not registered: {base_id}")
     base = registry[base_id]
-    profiles = __import__("pipeline.config", fromlist=["resolve_profiles"]).resolve_profiles(
+    profiles = resolve_profiles(
         str(project.get("hardware", "v100_16gb")),
         str(project["type"]),
         str(project.get("strategy", "quality")),
@@ -72,9 +80,9 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         generation = None
         prepared = {"images": []}
     selected = list(prepared.get("images", []))
-    selected_sources = {record["source"] for record in selected}
+    selected_sources = {str(record["source"]) for record in selected}
     corrupt_selected = [
-        record["path"]
+        str(record["path"])
         for record in inspection.get("images", [])
         if record.get("corrupt") and record["path"] in selected_sources
     ]
@@ -82,18 +90,60 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         blocking.append("Prepared dataset contains no images")
     if corrupt_selected:
         blocking.append(f"Prepared dataset contains {len(corrupt_selected)} corrupt image(s)")
-    validation_images = discover_images(state.project_dir / "validation")
     checks["dataset"] = {
         "raw_images": inspection.get("summary", {}).get("image_count", 0),
         "prepared_images": len(selected),
         "prepared_generation": generation.generation_id if generation else None,
         "prepared_generation_path": str(generation.root) if generation else None,
         "legacy_prepared_layout": bool(generation and generation.legacy),
-        "validation_images": len(validation_images),
         "corrupt_selected": corrupt_selected,
         "source_width": inspection.get("summary", {}).get("width", {}),
         "source_height": inspection.get("summary", {}).get("height", {}),
         "source_megapixels": inspection.get("summary", {}).get("megapixels", {}),
+    }
+
+    validation = inspect_dataset(state.project_dir / "validation")
+    validation_records = list(validation.get("images", []))
+    corrupt_validation = [
+        str(record["path"]) for record in validation_records if record.get("corrupt")
+    ]
+    if corrupt_validation:
+        blocking.append(
+            f"Validation split contains {len(corrupt_validation)} corrupt image(s)"
+        )
+    training_hashes = _prepared_image_hashes(generation, selected)
+    validation_hashes = {
+        str(record["sha256"]): str(record["path"])
+        for record in validation_records
+        if not record.get("corrupt") and record.get("sha256")
+    }
+    holdout_overlap = sorted(
+        {
+            validation_path
+            for image_hash, validation_path in validation_hashes.items()
+            if image_hash in training_hashes
+        }
+    )
+    if holdout_overlap:
+        blocking.append(
+            f"Validation split contains {len(holdout_overlap)} exact training duplicate(s)"
+        )
+    validation_summary = dict(validation.get("summary", {}))
+    if validation_summary.get("very_small_images"):
+        warnings.append(
+            f"Validation split contains {validation_summary['very_small_images']} very small image(s)"
+        )
+    if validation_summary.get("animated_images"):
+        warnings.append(
+            f"Validation split contains {validation_summary['animated_images']} animated image(s)"
+        )
+    checks["validation"] = {
+        "root": validation.get("root"),
+        "input_hash": validation.get("input_hash"),
+        "summary": validation_summary,
+        "corrupt_images": corrupt_validation,
+        "exact_training_overlap": holdout_overlap,
+        "excluded_from_training": True,
     }
 
     clip_l_counts: list[int] = []
@@ -109,9 +159,9 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     trigger_only = 0
     if generation:
         for record in selected:
-            caption_path = generation.root / record["caption"]
+            caption_path = generation.root / str(record["caption"])
             if not caption_path.is_file():
-                missing_captions.append(record["source"])
+                missing_captions.append(str(record["source"]))
                 continue
             text = caption_path.read_text(encoding="utf-8", errors="replace").strip()
             counts = count_sdxl_tokens(text)
@@ -157,9 +207,9 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     duplicate_manifest = state.project_dir / "review" / "duplicates" / "manifest.json"
     duplicate_summary: dict[str, Any] = {}
     if duplicate_manifest.exists():
-        duplicate_summary = json.loads(duplicate_manifest.read_text(encoding="utf-8")).get(
-            "summary", {}
-        )
+        duplicate_summary = json.loads(
+            duplicate_manifest.read_text(encoding="utf-8")
+        ).get("summary", {})
     checks["duplicates"] = {"excluded": len(excluded), **duplicate_summary}
 
     identity_manifest = state.project_dir / "review" / "outliers" / "manifest.json"
@@ -179,6 +229,10 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     resolution = profiles.merged.get("resolution", {})
     area = int(resolution.get("max_bucket_area", 0))
     hardware_area = int(profiles.hardware.get("resolution", {}).get("max_bucket_area", 0))
+    if area > hardware_area:
+        blocking.append(
+            f"Configured bucket area {area} exceeds hardware envelope {hardware_area}"
+        )
     checks["resolution"] = {
         "target": int(resolution.get("default", 1024)),
         "max_bucket_area": area,
@@ -196,7 +250,8 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     persistent_free_gib = round(persistent_usage.free / 1024**3, 3)
     if persistent_free_gib < minimum_free_gib:
         blocking.append(
-            f"Only {persistent_free_gib:.2f} GiB is free; at least {minimum_free_gib:.2f} GiB is required"
+            f"Only {persistent_free_gib:.2f} GiB is free; at least "
+            f"{minimum_free_gib:.2f} GiB is required"
         )
     writable = _is_writable(state.project_dir / "runs")
     if not writable:
@@ -210,7 +265,9 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         scratch = {
             "path": str(scratch_path),
             "writable": scratch_writable,
-            "free_gib": round(scratch_usage.free / 1024**3, 3) if scratch_usage else None,
+            "free_gib": round(scratch_usage.free / 1024**3, 3)
+            if scratch_usage
+            else None,
         }
         if not scratch_writable:
             blocking.append(f"Configured scratch_root is not writable: {scratch_path}")
@@ -230,7 +287,7 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         ),
     }
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "READY" if not blocking else "BLOCKED",
         "checks": checks,
         "blocking": blocking,
@@ -246,6 +303,23 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         output_manifest=str(path),
         details={"status": "READY", "warnings": warnings, "checks": checks},
     )
+
+
+def _prepared_image_hashes(
+    generation: Any, selected: list[dict[str, Any]]
+) -> set[str]:
+    hashes: set[str] = set()
+    if generation is None:
+        return hashes
+    for record in selected:
+        image_hash = record.get("source_image_sha256")
+        if image_hash:
+            hashes.add(str(image_hash))
+            continue
+        path = generation.root / str(record["image"])
+        if path.is_file():
+            hashes.add(sha256_file(path))
+    return hashes
 
 
 def _stats(values: list[int]) -> dict[str, float | int | None]:
