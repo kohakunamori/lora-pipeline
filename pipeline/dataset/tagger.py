@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,14 +26,9 @@ class TaggerBackend(ABC):
         raise NotImplementedError
 
     def cache_identity(self) -> Mapping[str, Any]:
-        return {
-            "class": f"{type(self).__module__}.{type(self).__qualname__}",
-            "config": {
-                key: value
-                for key, value in vars(self).items()
-                if isinstance(value, (str, int, float, bool, type(None)))
-            },
-        }
+        """Return immutable model/config identity; configurable backends should override."""
+
+        return {"class": f"{type(self).__module__}.{type(self).__qualname__}"}
 
 
 class CachedTagger(TaggerBackend):
@@ -43,14 +39,14 @@ class CachedTagger(TaggerBackend):
         self.cache_dir = cache_dir
 
     def cache_identity(self) -> Mapping[str, Any]:
-        return {"cached": self.backend.cache_identity(), "schema_version": 1}
+        return {"cached": self.backend.cache_identity(), "schema_version": 2}
 
     def tag(self, image: Path) -> TagResult:
         image_sha = sha256_file(image)
         identity = self.backend.cache_identity()
         key = stable_hash(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "image_sha256": image_sha,
                 "backend": identity,
             }
@@ -66,7 +62,7 @@ class CachedTagger(TaggerBackend):
         write_json_atomic(
             path,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "cache_key": key,
                 "image": str(image),
                 "image_sha256": image_sha,
@@ -98,6 +94,8 @@ class ImgutilsWdTagger(TaggerBackend):
     def cache_identity(self) -> Mapping[str, Any]:
         return {
             "backend": "imgutils-wd14",
+            "runtime_package": "dghs-imgutils",
+            "runtime_version": _package_version("dghs-imgutils"),
             "model_name": self.model_name,
             "general_threshold": self.threshold,
             "character_threshold": self.character_threshold,
@@ -122,6 +120,7 @@ class ImgutilsWdTagger(TaggerBackend):
             metadata={
                 "model_name": self.model_name,
                 "runtime": "imgutils-managed ONNX",
+                "runtime_version": _package_version("dghs-imgutils"),
                 "general_threshold": self.threshold,
                 "character_threshold": self.character_threshold,
             },
@@ -173,6 +172,13 @@ class DualTagger(TaggerBackend):
 
     def tag(self, image: Path) -> TagResult:
         return self.compare(image).stable
+
+
+def _package_version(package: str) -> str:
+    try:
+        return version(package)
+    except PackageNotFoundError:
+        return "unavailable"
 
 
 def _tag_result_to_json(result: TagResult) -> dict[str, Any]:
