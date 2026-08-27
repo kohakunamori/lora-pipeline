@@ -56,8 +56,24 @@ def test_extract_video_frames_filters_near_duplicates(tmp_path, monkeypatch) -> 
 
 def test_require_video_tools_reports_missing_programs(monkeypatch) -> None:
     monkeypatch.setattr(video_source.shutil, "which", lambda name: None)
+    monkeypatch.setattr(video_source.importlib.util, "find_spec", lambda name: None)
     with pytest.raises(PipelineError, match="ffmpeg, yt-dlp"):
         video_source.require_video_tools(remote=True)
+
+
+def test_require_video_tools_accepts_ytdlp_module_without_console_script(monkeypatch) -> None:
+    monkeypatch.setattr(
+        video_source.shutil,
+        "which",
+        lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None,
+    )
+    monkeypatch.setattr(
+        video_source.importlib.util,
+        "find_spec",
+        lambda name: object() if name == "yt_dlp" else None,
+    )
+
+    video_source.require_video_tools(remote=True)
 
 
 def test_url_detection_accepts_http_and_rejects_paths() -> None:

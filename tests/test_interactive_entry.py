@@ -7,6 +7,7 @@ from pipeline import cli, interactive
 
 def test_installed_entry_opens_dashboard_without_arguments(monkeypatch) -> None:
     called: list[str] = []
+    monkeypatch.setenv("LORA_PIPELINE_LANG", "en")
     monkeypatch.setattr(sys, "argv", ["lora-pipeline"])
     monkeypatch.setattr(
         interactive.InteractiveWizard,

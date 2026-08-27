@@ -7,6 +7,7 @@ import yaml
 from PIL import Image
 from rich.console import Console
 
+from pipeline import i18n
 from pipeline.models import STEP_NAMES
 from pipeline.state import ProjectState
 from pipeline.wizard import Wizard
@@ -31,6 +32,7 @@ def _state(root: Path, *, name: str = "demo", concept: str = "character") -> Pro
 
 def test_home_is_a_dashboard_and_can_exit_without_creating_a_project(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LORA_PIPELINE_ROOT", str(tmp_path))
+    i18n.set_language("en")
     console, stream = _console()
     wizard = Wizard(console=console)
     monkeypatch.setattr(wizard, "_menu", lambda *args, **kwargs: "quit")

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,7 +144,7 @@ def require_video_tools(*, remote: bool) -> None:
     missing: list[str] = []
     if shutil.which("ffmpeg") is None:
         missing.append("ffmpeg")
-    if remote and shutil.which("yt-dlp") is None:
+    if remote and importlib.util.find_spec("yt_dlp") is None:
         missing.append("yt-dlp")
     if missing:
         raise PipelineError(
@@ -249,7 +251,9 @@ def _resolve_video(
 
     output_template = temporary_dir / "source.%(ext)s"
     command = [
-        "yt-dlp",
+        sys.executable,
+        "-m",
+        "yt_dlp",
         "--no-playlist",
         "--no-progress",
         *proxy.yt_dlp_args(),

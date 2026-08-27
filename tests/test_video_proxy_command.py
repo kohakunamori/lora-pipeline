@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from pipeline import video_source
@@ -26,5 +27,6 @@ def test_resolve_remote_video_passes_custom_proxy_only_to_ytdlp(tmp_path, monkey
     assert resolved == tmp_path / "source.mp4"
     assert commands
     command = commands[0]
+    assert command[:3] == [sys.executable, "-m", "yt_dlp"]
     proxy_index = command.index("--proxy")
     assert command[proxy_index + 1] == "http://127.0.0.1:7890"
