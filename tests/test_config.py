@@ -28,13 +28,33 @@ def test_validated_profiles_resolve_independent_dimensions() -> None:
     assert config.merged["caption"]["shuffle"] is False
 
 
-def test_profile_validation_rejects_unvalidated_physical_batch() -> None:
+def test_user_controlled_physical_batch_is_not_artificially_capped() -> None:
+    config = resolve_profiles(
+        "v100_16gb",
+        "character",
+        "quality",
+        project_overrides={"training": {"batch_size": 4}},
+    )
+    assert config.merged["training"]["batch_size"] == 4
+
+
+def test_profile_validation_rejects_nonpositive_physical_batch() -> None:
     with pytest.raises(ConfigurationError, match="Physical batch"):
         resolve_profiles(
             "v100_16gb",
             "character",
             "quality",
-            project_overrides={"training": {"batch_size": 3}},
+            project_overrides={"training": {"batch_size": 0}},
+        )
+
+
+def test_profile_validation_rejects_nonpositive_gradient_accumulation() -> None:
+    with pytest.raises(ConfigurationError, match="Gradient accumulation"):
+        resolve_profiles(
+            "v100_16gb",
+            "character",
+            "quality",
+            project_overrides={"training": {"gradient_accumulation_steps": 0}},
         )
 
 
