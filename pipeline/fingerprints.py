@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
-from typing import Any, Mapping, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .config import load_base_registry, resolve_profiles, sha256_file, stable_hash
 from .dataset.image_info import discover_images
-from .models import PipelineError, STEP_NAMES
+from .models import STEP_NAMES, PipelineError
 from .prepared import load_current_generation
 
 if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 2
+FINGERPRINT_VERSION = 3
 
 STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "inspect": (),
@@ -54,7 +54,7 @@ def compute_step_signature(
     *,
     options: Mapping[str, Any] | None = None,
 ) -> str:
-    """Hash the effective inputs that decide whether a completed step is reusable."""
+    """Hash only the effective inputs that decide whether a step is reusable."""
 
     if name not in STEP_NAMES:
         raise PipelineError(f"Unknown step: {name}")
@@ -63,14 +63,6 @@ def compute_step_signature(
     payload: dict[str, Any] = {
         "fingerprint_version": FINGERPRINT_VERSION,
         "step": name,
-        "project": {
-            "type": project.get("type"),
-            "base": project.get("base"),
-            "trigger": project.get("trigger"),
-            "hardware": project.get("hardware"),
-            "strategy": project.get("strategy"),
-            "overrides": project.get("overrides", {}),
-        },
         "options": options,
     }
 
@@ -79,45 +71,68 @@ def compute_step_signature(
     elif name == "dedup":
         payload["inspection"] = _step_output_fingerprint(state, "inspect")
     elif name == "identity":
+        payload["concept_type"] = project.get("type")
         payload["inspection"] = _step_output_fingerprint(state, "inspect")
         payload["identity_profile"] = _profiles(state).concept.get("identity_check", {})
     elif name == "caption":
-        payload["raw_images"] = _raw_images(state)
-        payload["raw_captions"] = _raw_captions(state)
         profiles = _profiles(state)
-        payload["caption_profile"] = profiles.concept.get("caption", {})
-        payload["tagger_profile"] = profiles.concept.get("tagger", {})
-        payload["token_budget"] = profiles.merged.get("caption", {}).get(
-            "max_token_length",
-            profiles.hardware.get("caption", {}).get("default_max_token_length", 75),
+        payload.update(
+            {
+                "concept_type": project.get("type"),
+                "trigger": project.get("trigger"),
+                "raw_images": _raw_images(state),
+                "raw_captions": _raw_captions(state),
+                "caption_profile": profiles.concept.get("caption", {}),
+                "tagger_profile": profiles.concept.get("tagger", {}),
+                "token_budget": profiles.merged.get("caption", {}).get(
+                    "max_token_length",
+                    profiles.hardware.get("caption", {}).get(
+                        "default_max_token_length", 75
+                    ),
+                ),
+            }
         )
     elif name == "review":
         payload["dedup"] = _step_output_fingerprint(state, "dedup")
         payload["identity"] = _step_output_fingerprint(state, "identity")
         payload["caption"] = _step_output_fingerprint(state, "caption")
-        payload["existing_exclusions"] = _hash_optional(state.project_dir / "review" / "exclusions.yaml")
+        payload["existing_exclusions"] = _hash_optional(
+            state.project_dir / "review" / "exclusions.yaml"
+        )
     elif name == "prepare":
-        payload["raw_images"] = _raw_images(state)
-        payload["raw_captions"] = _raw_captions(state)
-        payload["caption"] = _step_output_fingerprint(state, "caption")
-        payload["exclusions"] = _hash_optional(state.project_dir / "review" / "exclusions.yaml")
-        payload["caption_mode"] = project.get("caption_mode")
-        payload["allow_trigger_only"] = bool(project.get("allow_trigger_only", False))
-    elif name == "preflight":
-        payload["prepared"] = _prepared_fingerprint(state)
-        payload["base"] = _base_fingerprint(state)
-        payload["profiles"] = _profiles(state).merged
-        payload["budget"] = project.get("budget", {})
-    elif name == "train":
-        payload["prepared"] = _prepared_fingerprint(state)
-        payload["base"] = _base_fingerprint(state)
-        payload["profiles"] = _profiles(state).merged
-        payload["budget"] = project.get("budget", {})
+        payload.update(
+            {
+                "trigger": project.get("trigger"),
+                "raw_images": _raw_images(state),
+                "raw_captions": _raw_captions(state),
+                "caption": _step_output_fingerprint(state, "caption"),
+                "exclusions": _hash_optional(
+                    state.project_dir / "review" / "exclusions.yaml"
+                ),
+                "caption_mode": project.get("caption_mode"),
+                "allow_trigger_only": bool(project.get("allow_trigger_only", False)),
+            }
+        )
+    elif name in {"preflight", "train"}:
+        payload.update(
+            {
+                "prepared": _prepared_fingerprint(state),
+                "base": _base_fingerprint(state),
+                "profiles": _profiles(state).merged,
+                "budget": project.get("budget", {}),
+            }
+        )
     elif name == "evaluate":
-        payload["run"] = _latest_run_fingerprint(state)
         profiles = _profiles(state)
-        payload["evaluation"] = profiles.merged.get("evaluation", {})
-        payload["base"] = _base_fingerprint(state)
+        payload.update(
+            {
+                "run": _latest_run_fingerprint(state),
+                "evaluation": profiles.merged.get("evaluation", {}),
+                "base": _base_fingerprint(state),
+                "trigger": project.get("trigger"),
+                "subject_prompt": project.get("evaluation", {}).get("subject_prompt"),
+            }
+        )
     return stable_hash(payload)
 
 
@@ -186,7 +201,12 @@ def _base_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
     stat: dict[str, Any] | None = None
     if base.path.is_file():
         info = base.path.stat()
-        stat = {"bytes": info.st_size, "mtime_ns": info.st_mtime_ns, "inode": info.st_ino}
+        stat = {
+            "bytes": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "inode": info.st_ino,
+            "device": info.st_dev,
+        }
     return {
         "id": base.id,
         "path": str(base.path),
@@ -220,4 +240,8 @@ def _latest_run_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
 def _hash_optional(path: Path) -> Mapping[str, Any] | None:
     if not path.is_file():
         return None
-    return {"path": str(path), "bytes": path.stat().st_size, "sha256": sha256_file(path)}
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
