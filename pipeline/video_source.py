@@ -26,6 +26,9 @@ _PROXY_ENV_NAMES = (
     "http_proxy",
 )
 _SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+_COOKIES_ENV_NAME = "LORA_VIDEO_COOKIES"
+_DEFAULT_COOKIES_PATH = Path("~/.config/lora-pipeline/youtube-cookies.txt").expanduser()
+_NETSCAPE_COOKIE_HEADERS = {"# HTTP Cookie File", "# Netscape HTTP Cookie File"}
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,47 @@ class VideoProxy:
 
 
 @dataclass(frozen=True)
+class VideoAuth:
+    """Authentication policy scoped only to the yt-dlp process.
+
+    Cookie contents and absolute cookie-file paths are deliberately excluded from
+    provenance so project metadata cannot become an authentication secret store.
+    """
+
+    mode: str = "none"
+    value: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"none", "cookies", "browser"}:
+            raise PipelineError(f"Unsupported video authentication mode: {self.mode}")
+        if self.mode == "cookies":
+            if not self.value:
+                raise PipelineError("Cookie authentication requires a cookies.txt path")
+            validate_cookies_file(Path(self.value).expanduser())
+        elif self.mode == "browser" and not (self.value or "").strip():
+            raise PipelineError("Browser-cookie authentication requires a browser specification")
+
+    def yt_dlp_args(self) -> list[str]:
+        if self.mode == "cookies":
+            return ["--cookies", str(Path(str(self.value)).expanduser().resolve())]
+        if self.mode == "browser":
+            return ["--cookies-from-browser", str(self.value)]
+        return []
+
+    def provenance(self) -> dict[str, object]:
+        if self.mode == "cookies":
+            return {
+                "mode": "cookies_file",
+                "configured": True,
+                "filename": Path(str(self.value)).name,
+            }
+        if self.mode == "browser":
+            browser = str(self.value).split(":", 1)[0].split("+", 1)[0]
+            return {"mode": "browser", "configured": True, "browser": browser}
+        return {"mode": "none", "configured": False}
+
+
+@dataclass(frozen=True)
 class VideoFrameReport:
     source: str
     downloaded_video: str
@@ -81,6 +125,7 @@ class VideoFrameReport:
     interval_seconds: int
     max_frames: int
     proxy: dict[str, object] | None = None
+    authentication: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -94,6 +139,7 @@ class VideoFrameReport:
             "interval_seconds": self.interval_seconds,
             "max_frames": self.max_frames,
             "proxy": self.proxy,
+            "authentication": self.authentication,
         }
 
 
@@ -108,6 +154,37 @@ def detect_environment_proxy() -> tuple[str | None, str | None]:
         if value:
             return name, value
     return None, None
+
+
+def detect_cookies_file() -> tuple[str | None, Path | None]:
+    """Return a configured cookie file without reading or persisting its contents."""
+
+    env_value = os.environ.get(_COOKIES_ENV_NAME)
+    if env_value:
+        path = Path(env_value).expanduser()
+        if path.is_file():
+            return _COOKIES_ENV_NAME, path.resolve()
+    if _DEFAULT_COOKIES_PATH.is_file():
+        return "default", _DEFAULT_COOKIES_PATH.resolve()
+    return None, None
+
+
+def validate_cookies_file(path: Path) -> None:
+    path = path.expanduser().resolve()
+    if not path.is_file():
+        raise PipelineError(f"Cookies file does not exist: {path}")
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline().strip().lstrip("\ufeff")
+            if first not in _NETSCAPE_COOKIE_HEADERS:
+                raise PipelineError(
+                    "Cookies file must use Netscape/Mozilla cookies.txt format"
+                )
+            has_youtube = any("youtube.com" in line.casefold() for line in handle)
+    except OSError as exc:
+        raise PipelineError(f"Cannot read cookies file: {path}") from exc
+    if not has_youtube:
+        raise PipelineError("Cookies file contains no youtube.com cookies")
 
 
 def validate_proxy_url(value: str) -> None:
@@ -161,6 +238,7 @@ def extract_video_frames(
     phash_distance: int = 7,
     blur_threshold: float = 55.0,
     proxy: VideoProxy | None = None,
+    auth: VideoAuth | None = None,
 ) -> VideoFrameReport:
     if interval_seconds < 1:
         raise PipelineError("Frame interval must be at least 1 second")
@@ -174,10 +252,17 @@ def extract_video_frames(
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     proxy = proxy or VideoProxy(mode="environment")
+    auth = auth or VideoAuth(mode="none")
 
     with tempfile.TemporaryDirectory(prefix="lora-video-") as temporary:
         temporary_dir = Path(temporary)
-        video_path = _resolve_video(source, temporary_dir, remote=remote, proxy=proxy)
+        video_path = _resolve_video(
+            source,
+            temporary_dir,
+            remote=remote,
+            proxy=proxy,
+            auth=auth,
+        )
         candidate_dir = temporary_dir / "frames"
         candidate_dir.mkdir()
         # Sample more candidates than the final cap because filtering can reject many.
@@ -233,6 +318,7 @@ def extract_video_frames(
             interval_seconds=interval_seconds,
             max_frames=max_frames,
             proxy=proxy.provenance() if remote else None,
+            authentication=auth.provenance() if remote else None,
         )
 
 
@@ -242,6 +328,7 @@ def _resolve_video(
     *,
     remote: bool,
     proxy: VideoProxy,
+    auth: VideoAuth,
 ) -> Path:
     if not remote:
         path = Path(source).expanduser().resolve()
@@ -257,6 +344,7 @@ def _resolve_video(
         "--no-playlist",
         "--no-progress",
         *proxy.yt_dlp_args(),
+        *auth.yt_dlp_args(),
         "-f",
         "bestvideo[height<=1080]/best[height<=1080]",
         "-o",
