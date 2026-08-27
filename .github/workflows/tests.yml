@@ -7,6 +7,10 @@ on:
       - codex/**
   pull_request:
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     runs-on: ubuntu-latest
@@ -21,7 +25,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --no-deps -e .
-          python -m pip install pytest==9.0.2 PyYAML==6.0.3 Pillow==12.1.0 ImageHash==4.3.2 Jinja2==3.1.6 rich==14.1.0 safetensors==0.4.5 typer==0.21.1 transformers==4.54.1 tokenizers==0.21.4 huggingface-hub==0.34.3
+          python -m pip install \
+            pytest==9.0.2 \
+            PyYAML==6.0.3 \
+            Pillow==12.1.0 \
+            ImageHash==4.3.2 \
+            Jinja2==3.1.6 \
+            rich==14.1.0 \
+            safetensors==0.4.5 \
+            typer==0.21.1 \
+            transformers==4.54.1 \
+            tokenizers==0.21.4 \
+            huggingface-hub==0.34.3
       - name: Compile Python sources
         run: python -m compileall -q pipeline tests
       - name: Run CPU test suite
