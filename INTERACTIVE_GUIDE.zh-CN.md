@@ -64,11 +64,12 @@ lora-pipeline
 1. **Continue recommended work**：按照保存的工作流偏好继续执行；
 2. **Run one step**：单独运行、重试或强制重跑某个步骤；
 3. **Workflow preferences**：保存 caption、去重、审核和评测偏好；
-4. **Import validation images**：从目录导入独立验证集并自动检查训练集泄漏；
-5. **Evaluate checkpoints**：通过编号选择 Screening 或 Full Evaluation；
-6. **Promote a checkpoint**：人工确认后生成 `best.safetensors`；
-7. **Status and artifacts**：查看数据、报告、contact sheet、run 和输出路径；
-8. **Advanced recovery**：只用于预览、锁恢复或显式跳过 preflight。
+4. **Project settings**：修改曝光预算、训练策略或 Character 评测主体描述；
+5. **Import validation images**：从目录导入独立验证集并自动检查训练集泄漏；
+6. **Evaluate checkpoints**：通过编号选择 Screening 或 Full Evaluation；
+7. **Promote a checkpoint**：人工确认后生成 `best.safetensors`；
+8. **Status and artifacts**：查看数据、报告、contact sheet、run 和输出路径；
+9. **Advanced recovery**：只用于预览、锁恢复或显式跳过 preflight。
 
 ## 可保存的工作流偏好
 
@@ -83,6 +84,18 @@ lora-pipeline
 - 训练后是否自动运行 Screening Evaluation。
 
 以后在项目仪表盘选择 **Continue recommended work** 即可复用这些设置。
+
+## 项目设置
+
+在 **Project settings** 中可以直接修改：
+
+- `images_seen` 训练曝光预算；
+- Quality、Fast 或 Cached 训练策略；
+- Character Evaluation 使用的 subject prompt。
+
+修改曝光预算或训练策略只会让 Preflight、Train 和 Evaluation 重新变为待执行，不会重新复制原图或重建不相关的前处理结果。
+
+修改 Evaluation subject prompt 只会让 Evaluation 失效，不会要求重新训练。
 
 ## 导入独立验证集
 
@@ -160,4 +173,4 @@ best.yaml
 
 ## 高级命令仍然可用
 
-原有的非交互式子命令继续保留，适合自动化或调试。但正常的创建、训练、恢复、评测、晋升、验证集导入和底模管理均可在编号菜单中完成。
+原有的非交互式子命令继续保留，适合自动化或调试。但正常的创建、训练、恢复、评测、晋升、验证集导入、项目设置和底模管理均可在编号菜单中完成。
