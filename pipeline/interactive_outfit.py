@@ -12,11 +12,18 @@ from .training_config import (
     parse_anchor_tags,
     prompt_contains_trigger,
 )
+from .training_parameters import (
+    TRAINING_PARAMETER_SPECS,
+    effective_training_settings,
+    reset_key_training_overrides,
+    strategy_training_defaults,
+    update_key_training_overrides,
+)
 from .wizard import MenuItem, STRATEGIES
 
 
 class InteractiveWizard(BaseInteractiveWizard):
-    """Final UX layer for explicit character-outfit training targets."""
+    """Final UX layer for explicit character-outfit targets and key parameter tuning."""
 
     def _create_training_config(self) -> TrainingConfig | None:
         registry = self._enabled_bases()
@@ -79,16 +86,14 @@ class InteractiveWizard(BaseInteractiveWizard):
             overrides: dict[str, Any] = {}
             if not self._confirm(
                 self._b(
-                    "LoRA rank / alpha / 学习率使用策略默认值吗？",
-                    "Use strategy defaults for LoRA rank / alpha / learning rate?",
+                    "关键训练参数使用策略预设吗？",
+                    "Use strategy defaults for key training parameters?",
                 ),
                 default=True,
             ):
-                overrides["training"] = {
-                    "network_dim": self._ask_positive_int("LoRA rank / network_dim", default=16),
-                    "network_alpha": self._ask_positive_int("LoRA alpha / network_alpha", default=8),
-                    "unet_lr": self._ask_positive_float("UNet learning rate", default=0.0001),
-                }
+                self._render_training_parameter_help(strategy, images_seen=images_seen)
+                overrides = self._ask_key_training_parameters(strategy, overrides)
+
             evaluation: dict[str, Any] = {}
             if concept == "character":
                 label = (
@@ -170,6 +175,43 @@ class InteractiveWizard(BaseInteractiveWizard):
             self._b("[green]基础设置已保存。[/green]", "[green]Core settings saved.[/green]")
         )
 
+    def _edit_training_config_lora(self, config: TrainingConfig) -> None:
+        action = self._menu(
+            self._b("关键训练参数", "Key training parameters"),
+            [
+                MenuItem(
+                    "custom",
+                    self._b("自定义关键参数", "Customize key parameters"),
+                    self._b(
+                        "只保存与当前策略预设不同的值。",
+                        "Only values that differ from the current strategy preset are stored.",
+                    ),
+                ),
+                MenuItem(
+                    "reset",
+                    self._b("恢复关键参数预设", "Reset key parameters to preset"),
+                ),
+                MenuItem("back", self._b("返回", "Back")),
+            ],
+            default="custom",
+        )
+        if action == "back":
+            return
+        if action == "reset":
+            config.data["overrides"] = reset_key_training_overrides(config.overrides)
+        else:
+            self._render_training_parameter_help(config.strategy, images_seen=config.images_seen)
+            config.data["overrides"] = self._ask_key_training_parameters(
+                config.strategy, config.overrides
+            )
+        config.save()
+        self.console.print(
+            self._b(
+                "[green]关键训练参数已保存。[/green]",
+                "[green]Key training parameters saved.[/green]",
+            )
+        )
+
     def _edit_training_config_evaluation(self, config: TrainingConfig) -> None:
         if config.concept_type == "character":
             label = (
@@ -207,24 +249,29 @@ class InteractiveWizard(BaseInteractiveWizard):
         table.add_column(self._b("底模", "Base"))
         table.add_column(self._b("策略", "Strategy"))
         table.add_column("Rank", justify="right")
+        table.add_column("Batch", justify="right")
         table.add_column("images_seen", justify="right")
         table.add_column(self._b("快照", "Snapshot"))
         for config in configs:
-            training = config.overrides.get("training", {})
+            training = effective_training_settings(config.strategy, config.overrides)
             table.add_row(
                 config.name,
                 config.target_type,
                 config.base,
                 config.strategy,
-                str(training.get("network_dim", self._b("默认", "default"))),
+                str(training.get("network_dim", 16)),
+                str(training.get("batch_size", 1)),
                 str(config.images_seen),
                 config.snapshot()["snapshot_hash"][:10],
             )
         self.console.print(table)
 
     def _render_training_config_detail(self, config: TrainingConfig) -> None:
-        training = config.overrides.get("training", {})
+        training = effective_training_settings(config.strategy, config.overrides)
+        custom = config.overrides.get("training", {})
         workflow = config.workflow
+        physical_batch = int(training.get("batch_size", 1))
+        accumulation = int(training.get("gradient_accumulation_steps", 1))
         table = Table(
             title=self._b(
                 f"训练配置 · {config.name}", f"Training config · {config.name}"
@@ -248,20 +295,123 @@ class InteractiveWizard(BaseInteractiveWizard):
             )
         table.add_row(self._b("策略", "Strategy"), config.strategy)
         table.add_row("images_seen", str(config.images_seen))
+        table.add_row("Rank", self._value_source("network_dim", training, custom))
+        table.add_row("Alpha", self._value_source("network_alpha", training, custom))
+        table.add_row("UNet LR", self._value_source("unet_lr", training, custom))
         table.add_row(
-            "Rank", str(training.get("network_dim", self._b("策略默认", "strategy default")))
+            self._b("物理 Batch", "Physical batch"),
+            self._value_source("batch_size", training, custom),
         )
         table.add_row(
-            "Alpha", str(training.get("network_alpha", self._b("策略默认", "strategy default")))
+            self._b("梯度累积", "Gradient accumulation"),
+            self._value_source("gradient_accumulation_steps", training, custom),
         )
         table.add_row(
-            "UNet LR", str(training.get("unet_lr", self._b("策略默认", "strategy default")))
+            self._b("有效 Batch", "Effective batch"),
+            str(physical_batch * accumulation),
         )
+        table.add_row("Seed", self._value_source("seed", training, custom))
         table.add_row("Caption", str(workflow.get("caption_mode", "auto")))
         table.add_row(
             self._b("配置快照", "Config snapshot"), config.snapshot()["snapshot_hash"][:16]
         )
         self.console.print(table)
+
+    def _render_training_parameter_help(self, strategy: str, *, images_seen: int) -> None:
+        defaults = strategy_training_defaults(strategy)
+        table = Table(
+            title=self._b(
+                f"关键训练参数说明 · {strategy}",
+                f"Key training parameter guide · {strategy}",
+            )
+        )
+        table.add_column(self._b("参数", "Parameter"), style="bold", no_wrap=True)
+        table.add_column(self._b("当前预设", "Preset"), no_wrap=True)
+        table.add_column(self._b("说明 / 建议", "Description / recommendation"))
+        for spec in TRAINING_PARAMETER_SPECS:
+            if spec.key == "images_seen":
+                preset = str(images_seen)
+            else:
+                preset = str(defaults.get(spec.key, "—"))
+            description = (
+                f"{spec.description_zh}\n[dim]{spec.recommendation_zh}[/dim]"
+                if self.zh
+                else f"{spec.description_en}\n[dim]{spec.recommendation_en}[/dim]"
+            )
+            table.add_row(
+                spec.label_zh if self.zh else spec.label_en,
+                preset,
+                description,
+            )
+        self.console.print(table)
+        self.console.print(
+            self._b(
+                "[dim]注意：固定 images_seen 时，有效 Batch = 物理 Batch × 梯度累积；有效 Batch 越大，optimizer step 数越少，因此并非完全等价的纯加速开关。[/dim]",
+                "[dim]With fixed images_seen, effective batch = physical batch × gradient accumulation. A larger effective batch means fewer optimizer steps, so this is not a purely equivalent speed switch.[/dim]",
+            )
+        )
+
+    def _ask_key_training_parameters(
+        self,
+        strategy: str,
+        overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        effective = effective_training_settings(strategy, overrides)
+        values = {
+            "network_dim": self._ask_positive_int(
+                "LoRA Rank / network_dim", default=int(effective.get("network_dim", 16))
+            ),
+            "network_alpha": self._ask_positive_int(
+                "LoRA Alpha / network_alpha", default=int(effective.get("network_alpha", 8))
+            ),
+            "unet_lr": self._ask_positive_float(
+                "UNet learning rate", default=float(effective.get("unet_lr", 0.0001))
+            ),
+            "batch_size": self._ask_positive_int(
+                self._b(
+                    "物理 Batch Size（无人工上限，以实际显存为准）",
+                    "Physical batch size (no artificial cap; actual VRAM decides)",
+                ),
+                default=int(effective.get("batch_size", 1)),
+            ),
+            "gradient_accumulation_steps": self._ask_positive_int(
+                self._b("梯度累积步数", "Gradient accumulation steps"),
+                default=int(effective.get("gradient_accumulation_steps", 1)),
+            ),
+            "seed": self._ask_nonnegative_int(
+                self._b("随机种子 Seed", "Random seed"),
+                default=int(effective.get("seed", 42)),
+            ),
+        }
+        return update_key_training_overrides(
+            overrides,
+            strategy=strategy,
+            values=values,
+        )
+
+    def _ask_nonnegative_int(self, label: str, *, default: int) -> int:
+        while True:
+            raw = self._ask_text(label, default=str(default)).strip()
+            try:
+                value = int(raw)
+            except ValueError:
+                self.console.print(self._b("[red]请输入整数。[/red]", "[red]Enter an integer.[/red]"))
+                continue
+            if value < 0:
+                self.console.print(
+                    self._b("[red]数值不能小于 0。[/red]", "[red]Value must be at least 0.[/red]")
+                )
+                continue
+            return value
+
+    def _value_source(
+        self,
+        key: str,
+        effective: dict[str, Any],
+        custom: dict[str, Any],
+    ) -> str:
+        source = self._b("自定义", "custom") if key in custom else self._b("预设", "preset")
+        return f"{effective.get(key, '—')} ({source})"
 
     def _ask_training_trigger(self, name: str, *, default: str | None = None) -> str:
         default_value = default or f"zz_{name}"
@@ -274,7 +424,9 @@ class InteractiveWizard(BaseInteractiveWizard):
                 default=default_value,
             ).strip()
             if not value:
-                self.console.print(self._b("[red]Trigger 不能为空。[/red]", "[red]Trigger cannot be empty.[/red]"))
+                self.console.print(
+                    self._b("[red]Trigger 不能为空。[/red]", "[red]Trigger cannot be empty.[/red]")
+                )
                 continue
             if "," in value:
                 self.console.print(
