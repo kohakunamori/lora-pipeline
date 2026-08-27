@@ -1,22 +1,152 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import sha256_file
+from .config import repository_root, sha256_file
 from .dataset.image_info import discover_images
 from .models import PipelineError
-from .service import load_project
+from .service import create_project, load_project
 from .state import ProjectState, utc_now
+from .video_source import extract_video_frames, is_url
 from .wizard import MenuItem, STRATEGIES, Wizard
 
 
 class InteractiveWizard(Wizard):
     """The full-screen interactive application, including project data utilities."""
+
+    def new_project(self) -> ProjectState | None:
+        source_kind = self._menu(
+            "Training data source",
+            [
+                MenuItem(
+                    "images",
+                    "Image directory",
+                    "Use an existing folder of training images and optional caption sidecars.",
+                ),
+                MenuItem(
+                    "video",
+                    "Video / YouTube URL",
+                    "Download or open a video, sample useful frames, and create a Character LoRA dataset.",
+                ),
+            ],
+            default="images",
+        )
+        if source_kind == "images":
+            return super().new_project()
+        return self._new_project_from_video()
+
+    def _new_project_from_video(self) -> ProjectState | None:
+        self.console.print(
+            Panel.fit(
+                "[bold blue]Create a Character LoRA project from video[/bold blue]\n"
+                "The importer samples frames, removes blurry or badly exposed frames, and filters near-duplicates "
+                "before the normal LoRA pipeline starts."
+            )
+        )
+        registry = self._enabled_bases()
+        if not registry:
+            self.console.print("[yellow]No enabled base checkpoint is registered yet.[/yellow]")
+            if self._confirm("Open base model manager now?", default=True):
+                self.base_manager()
+                registry = self._enabled_bases()
+            if not registry:
+                self.console.print("[red]Project creation needs at least one enabled base model.[/red]")
+                return None
+
+        name = self._ask_project_name()
+        base = self._select_base(registry, title="Base checkpoint")
+        source = self._ask_text("YouTube URL or local video path").strip()
+        if not source:
+            raise PipelineError("Video source cannot be empty")
+        interval_seconds = self._ask_positive_int("Sample one frame every N seconds", default=2)
+        max_frames = self._ask_positive_int("Maximum accepted frames", default=250)
+
+        cache_root = repository_root() / "cache" / "video-imports"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"{name}-", dir=cache_root) as temporary:
+            frame_dir = Path(temporary) / "frames"
+            self.console.print(
+                Panel.fit(
+                    "[cyan]Preparing video frames[/cyan]\n"
+                    f"Source: {source}\n"
+                    f"Sampling interval: {interval_seconds}s\n"
+                    f"Maximum accepted frames: {max_frames}"
+                )
+            )
+            report = extract_video_frames(
+                source,
+                frame_dir,
+                interval_seconds=interval_seconds,
+                max_frames=max_frames,
+            )
+            image_count = report.accepted_frames
+            self._render_video_report(report.as_dict())
+            trigger = self._ask_trigger(name)
+            strategy = self._menu("Training strategy", list(STRATEGIES), default="quality")
+            images_seen = self._ask_positive_int("Image exposure budget", default=max(1000, image_count * 8))
+            equivalent_epochs = round(images_seen / image_count, 2)
+
+            summary = Table(title="Video project summary", show_header=False)
+            summary.add_column("Field", style="bold")
+            summary.add_column("Value")
+            summary.add_row("Name", name)
+            summary.add_row("Concept", "character")
+            summary.add_row("Base", base)
+            summary.add_row("Video source", source)
+            summary.add_row("Accepted frames", str(image_count))
+            summary.add_row("Sampling interval", f"{interval_seconds}s")
+            summary.add_row("Trigger", trigger)
+            summary.add_row("Strategy", strategy)
+            summary.add_row("Image exposures", str(images_seen))
+            summary.add_row("Approx. equivalent epochs", str(equivalent_epochs))
+            self.console.print(summary)
+            if not self._confirm("Create this project from the filtered frames?", default=True):
+                self.console.print("[dim]Project creation cancelled; temporary video frames were discarded.[/dim]")
+                return None
+
+            state = create_project(
+                name=name,
+                concept_type="character",
+                base=base,
+                trigger=trigger,
+                strategy=strategy,
+                dataset=frame_dir,
+                images_seen=images_seen,
+            )
+            provenance = report.as_dict()
+            provenance.pop("downloaded_video", None)
+            provenance["source_kind"] = "remote_url" if is_url(source) else "local_video"
+            state.payload["project"]["video_source"] = provenance
+            state.save()
+
+        self.console.print(
+            Panel.fit(
+                f"[green bold]Video project created[/green bold]\n{state.project_dir}\n"
+                f"Imported {image_count} filtered frames into the immutable raw dataset."
+            )
+        )
+        if self._confirm("Configure the guided workflow now?", default=True):
+            self.configure_workflow(state.name)
+        if self._confirm("Open the project dashboard?", default=True):
+            self.project_dashboard(state.name)
+        return state
+
+    def _render_video_report(self, report: dict[str, object]) -> None:
+        table = Table(title="Video frame filtering")
+        table.add_column("Metric", style="bold")
+        table.add_column("Count", justify="right")
+        table.add_row("Sampled candidates", str(report["sampled_frames"]))
+        table.add_row("Accepted training frames", str(report["accepted_frames"]))
+        table.add_row("Rejected: blurry", str(report["rejected_blurry"]))
+        table.add_row("Rejected: near-duplicate", str(report["rejected_near_duplicate"]))
+        table.add_row("Rejected: exposure", str(report["rejected_exposure"]))
+        self.console.print(table)
 
     def project_dashboard(self, name: str, *, auto_continue: bool = False) -> None:
         first_iteration = True
@@ -223,6 +353,10 @@ class InteractiveWizard(Wizard):
                 "Evaluation subject",
                 str(project.get("evaluation", {}).get("subject_prompt", "1girl")),
             )
+        video_source = project.get("video_source")
+        if isinstance(video_source, dict):
+            table.add_row("Video source", str(video_source.get("source", "")))
+            table.add_row("Video accepted frames", str(video_source.get("accepted_frames", "")))
         self.console.print(table)
 
     @staticmethod
