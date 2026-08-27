@@ -20,3 +20,5 @@ projects/*
 !projects/.gitkeep
 datasets/*
 !datasets/.gitkeep
+training-configs/*.yaml
+!training-configs/.gitkeep
