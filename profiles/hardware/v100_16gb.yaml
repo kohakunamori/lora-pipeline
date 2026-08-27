@@ -1,0 +1,30 @@
+id: v100_16gb
+
+gpu:
+  architecture: volta
+  compute_capability: "7.0"
+  vram_gb: 16
+
+precision:
+  mixed_precision: fp16
+  save_precision: fp16
+  no_half_vae: true
+
+attention:
+  backend: sdpa
+
+memory:
+  gradient_checkpointing: true
+
+resolution:
+  default: 1024
+  max_bucket_area: 1048576
+  bucket_reso_steps: 32
+  enable_bucket: true
+  bucket_no_upscale: true
+
+caption:
+  default_max_token_length: 75
+
+limits:
+  max_physical_batch_1024: 2

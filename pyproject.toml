@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lora-pipeline"
+version = "0.1.0"
+description = "A resumable Illustrious/SDXL LoRA orchestration layer around sd-scripts."
+requires-python = ">=3.11"
+dependencies = [
+  "dghs-imgutils==0.19.0",
+  "ImageHash==4.3.2",
+  "Jinja2==3.1.6",
+  "Pillow==12.1.0",
+  "PyYAML==6.0.3",
+  "rich==14.1.0",
+  "safetensors==0.4.5",
+  "typer==0.21.1",
+]
+
+[project.scripts]
+lora-pipeline = "pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = '-ra -m "not gpu"'
+markers = [
+  "gpu: requires an explicitly configured V100 environment and is not run by default",
+]

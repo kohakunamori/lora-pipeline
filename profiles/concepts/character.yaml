@@ -1,0 +1,57 @@
+id: character
+concept:
+  type: character
+
+tagger:
+  stable_backend: wd_eva02_large_v3
+  dual_enabled: false
+  challenger_backend: null
+  conflict_delta: 0.35
+
+identity_check:
+  enabled: true
+  method: ccip
+  min_samples: 2
+
+caption:
+  trigger_position: first
+  describe_outfit: true
+  describe_pose: true
+  describe_expression: true
+  describe_background: true
+  caption_identity_features:
+    mode: conservative
+  blacklist:
+    - artist_name
+    - signature
+    - watermark
+  ordering:
+    - trigger
+    - subject
+    - character
+    - outfit
+    - pose
+    - expression
+    - composition
+    - background
+    - objects
+    - lighting
+
+evaluation:
+  identity: true
+  leakage: true
+  cross_content: true
+  strengths: [0.4, 0.6, 0.8, 1.0]
+  prompts:
+    - portrait
+    - upper body
+    - full body
+    - different outfit
+    - different hairstyle
+    - different expression
+    - dynamic pose
+    - complex background
+    - indoor
+    - outdoor
+    - day
+    - night

@@ -1,0 +1,2 @@
+# `./lora base add` creates the ignored `bases/registry.yaml` file.
+bases: {}

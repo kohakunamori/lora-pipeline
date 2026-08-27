@@ -1,0 +1,29 @@
+pretrained_model_name_or_path = "/path/to/base-model.safetensors"
+network_module = "networks.lora"
+network_train_unet_only = true
+network_dim = 16
+network_alpha = 8
+
+optimizer_type = "AdamW8bit"
+learning_rate = 0.0001
+unet_lr = 0.0001
+lr_scheduler = "constant"
+max_grad_norm = 1.0
+
+mixed_precision = "fp16"
+save_precision = "fp16"
+no_half_vae = true
+sdpa = true
+gradient_checkpointing = true
+cache_latents = true
+cache_latents_to_disk = true
+max_data_loader_n_workers = 0
+
+max_train_steps = 4
+gradient_accumulation_steps = 1
+max_token_length = 75
+seed = 42
+
+save_model_as = "safetensors"
+save_every_n_steps = 4
+save_state = false

@@ -1,0 +1,27 @@
+id: fast
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  cache_latents: true
+  cache_latents_to_disk: true
+  cache_text_encoder_outputs: false
+  cache_text_encoder_outputs_to_disk: false
+  network_module: networks.lora
+  network_train_unet_only: true
+  network_dim: 16
+  network_alpha: 8
+  optimizer: AdamW8bit
+  unet_lr: 0.0001
+  lr_scheduler: constant
+  max_grad_norm: 1.0
+  seed: 42
+caption:
+  shuffle: true
+  keep_tokens: 1
+  dropout_rate: 0
+  tag_dropout_rate: 0.05
+  token_warmup_step: 0
+checkpoints:
+  target_candidates: 4
+evaluation:
+  sample_density: reduced

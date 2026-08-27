@@ -1,0 +1,68 @@
+id: style
+concept:
+  type: style
+
+tagger:
+  stable_backend: wd_eva02_large_v3
+  dual_enabled: false
+  challenger_backend: null
+  conflict_delta: 0.35
+
+identity_check:
+  enabled: false
+  method: null
+
+caption:
+  trigger_position: first
+  describe_subject: true
+  describe_clothing: true
+  describe_pose: true
+  describe_scene: true
+  describe_objects: true
+  describe_composition: true
+  describe_lighting_context: true
+  suppress_style_descriptors: true
+  blacklist:
+    - artist_name
+    - signature
+    - watermark
+
+distribution:
+  tags:
+    portrait: [portrait, close-up, close_up, face]
+    full_body: [full_body]
+    single_person: [1girl, 1boy, solo]
+    multiple_people: [2girls, 2boys, multiple_girls, multiple_boys, group]
+    female: [1girl, female]
+    male: [1boy, male]
+    landscape: [landscape, scenery, no_humans]
+    indoor: [indoors]
+    outdoor: [outdoors]
+    day: [day]
+    night: [night]
+    simple_background: [simple_background]
+    complex_background: [detailed_background, complex_background]
+  bias_warning:
+    dominant_subject_fraction: 0.8
+    portrait_fraction: 0.8
+    message: Potential subject/composition bias
+
+evaluation:
+  identity: false
+  leakage: true
+  strengths: [0.4, 0.6, 0.8, 1.0]
+  prompts:
+    - female portrait
+    - male portrait
+    - full body
+    - two characters
+    - animal
+    - landscape
+    - interior
+    - city
+    - nature
+    - day
+    - night
+    - action scene
+    - simple composition
+    - complex composition
