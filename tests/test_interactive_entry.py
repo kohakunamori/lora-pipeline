@@ -8,7 +8,11 @@ from pipeline import cli, interactive
 def test_installed_entry_opens_dashboard_without_arguments(monkeypatch) -> None:
     called: list[str] = []
     monkeypatch.setattr(sys, "argv", ["lora-pipeline"])
-    monkeypatch.setattr(interactive.Wizard, "home", lambda self: called.append("home"))
+    monkeypatch.setattr(
+        interactive.InteractiveWizard,
+        "home",
+        lambda self: called.append("home"),
+    )
 
     interactive.main()
 
