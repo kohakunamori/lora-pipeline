@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from rich.panel import Panel
+from rich.table import Table
 
 from .config import sha256_file
 from .dataset.image_info import discover_images
 from .models import PipelineError
 from .service import load_project
 from .state import ProjectState, utc_now
-from .wizard import MenuItem, Wizard
+from .wizard import MenuItem, STRATEGIES, Wizard
 
 
 class InteractiveWizard(Wizard):
@@ -34,6 +35,11 @@ class InteractiveWizard(Wizard):
                     MenuItem("step", "Run one step", "Choose and run, retry, or force a specific pipeline step."),
                     MenuItem("workflow", "Workflow preferences", "Save caption, review, and screening defaults."),
                     MenuItem(
+                        "settings",
+                        "Project settings",
+                        "Change the exposure budget, strategy, or evaluation subject prompt.",
+                    ),
+                    MenuItem(
                         "validation",
                         "Import validation images",
                         "Add unseen holdout images without copying files by hand.",
@@ -52,6 +58,7 @@ class InteractiveWizard(Wizard):
                 "continue": lambda: self.continue_project(name),
                 "step": lambda: self.run_one_step(name),
                 "workflow": lambda: self.configure_workflow(name),
+                "settings": lambda: self.project_settings(name),
                 "validation": lambda: self.import_validation_images(name),
                 "evaluate": lambda: self.evaluate_project(name),
                 "promote": lambda: self.promote_checkpoint(name),
@@ -59,6 +66,69 @@ class InteractiveWizard(Wizard):
                 "advanced": lambda: self.advanced_menu(name),
             }
             self._guarded(handlers[action])
+
+    def project_settings(self, name: str) -> None:
+        while True:
+            state = load_project(name)
+            project = state.payload["project"]
+            self._render_project_settings(state)
+            items = [
+                MenuItem(
+                    "budget",
+                    "Change image-exposure budget",
+                    "Updates preflight and future training without touching prepared data.",
+                ),
+                MenuItem(
+                    "strategy",
+                    "Change training strategy",
+                    "Switch between Quality, Fast, and Cached profiles.",
+                ),
+            ]
+            if state.concept_type == "character":
+                items.append(
+                    MenuItem(
+                        "subject",
+                        "Change evaluation subject prompt",
+                        "Describe the subject used in Character evaluation prompts.",
+                    )
+                )
+            items.append(MenuItem("back", "Back"))
+            action = self._menu("Project settings", items, default="budget")
+            if action == "back":
+                return
+            if action == "budget":
+                current = int(project.get("budget", {}).get("value", 1000))
+                value = self._ask_positive_int("New image-exposure budget", default=current)
+                if value == current:
+                    self.console.print("[dim]Budget is unchanged.[/dim]")
+                    continue
+                project["budget"] = {"unit": "images_seen", "value": value}
+                state.invalidate_downstream("prepare", reason="training exposure budget changed")
+                state.save()
+                self.console.print(f"[green]Exposure budget updated to {value} images.[/green]")
+            elif action == "strategy":
+                current = str(project.get("strategy", "quality"))
+                value = self._menu("Training strategy", list(STRATEGIES), default=current)
+                if value == current:
+                    self.console.print("[dim]Training strategy is unchanged.[/dim]")
+                    continue
+                project["strategy"] = value
+                state.invalidate_downstream("prepare", reason="training strategy changed")
+                state.save()
+                self.console.print(f"[green]Training strategy updated to {value}.[/green]")
+            elif action == "subject":
+                evaluation = project.setdefault("evaluation", {})
+                current = str(evaluation.get("subject_prompt", "1girl"))
+                value = self._ask_text("Evaluation subject prompt", default=current).strip()
+                if not value:
+                    raise PipelineError("Evaluation subject prompt cannot be empty")
+                if value == current:
+                    self.console.print("[dim]Evaluation subject prompt is unchanged.[/dim]")
+                    continue
+                evaluation["subject_prompt"] = value
+                state.invalidate_downstream("train", reason="evaluation subject prompt changed")
+                state.save()
+                self.console.print("[green]Evaluation subject prompt updated.[/green]")
 
     def import_validation_images(self, name: str) -> None:
         state = load_project(name)
@@ -135,6 +205,25 @@ class InteractiveWizard(Wizard):
                 f"Destination: {destination_root}"
             )
         )
+
+    def _render_project_settings(self, state: ProjectState) -> None:
+        project = state.payload["project"]
+        table = Table(title="Current project settings", show_header=False)
+        table.add_column("Setting", style="bold")
+        table.add_column("Value")
+        table.add_row(
+            "Image exposures",
+            str(project.get("budget", {}).get("value", "not set")),
+        )
+        table.add_row("Training strategy", str(project.get("strategy", "quality")))
+        table.add_row("Base", str(project.get("base", "")))
+        table.add_row("Trigger", str(project.get("trigger", "")))
+        if state.concept_type == "character":
+            table.add_row(
+                "Evaluation subject",
+                str(project.get("evaluation", {}).get("subject_prompt", "1girl")),
+            )
+        self.console.print(table)
 
     @staticmethod
     def _available_validation_target(target: Path) -> Path:
