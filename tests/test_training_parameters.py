@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-import pytest
+from io import StringIO
+from types import SimpleNamespace
 
+import pytest
+from rich.console import Console
+
+from pipeline import i18n
+from pipeline.interactive import InteractiveWizard
 from pipeline.models import PipelineError
 from pipeline.training_parameters import (
     TRAINING_PARAMETER_SPECS,
@@ -10,6 +16,7 @@ from pipeline.training_parameters import (
     update_key_training_overrides,
     validate_training_override_values,
 )
+from pipeline.web_outfit import OutfitHandler
 
 
 def test_parameter_guide_covers_every_user_facing_key() -> None:
@@ -71,6 +78,38 @@ def test_reset_removes_only_managed_key_overrides() -> None:
 
 def test_custom_batch_has_no_artificial_upper_bound() -> None:
     validate_training_override_values({"training": {"batch_size": 16}})
+
+
+def test_cli_parameter_guide_renders_descriptions() -> None:
+    i18n.set_language("zh-CN")
+    stream = StringIO()
+    wizard = InteractiveWizard(
+        console=Console(file=stream, force_terminal=False, color_system=None, width=180)
+    )
+    wizard._render_training_parameter_help("quality", images_seen=2000)
+    output = stream.getvalue()
+    assert "关键训练参数说明" in output
+    assert "物理 Batch Size" in output
+    assert "不设置人工上限" in output
+    assert "有效 Batch" in output
+
+
+def test_web_batch_override_can_exceed_old_v100_limit_and_blank_values_use_preset(tmp_path) -> None:
+    handler = object.__new__(OutfitHandler)
+    handler.app = SimpleNamespace(root=tmp_path)
+    form = {
+        "batch_size": ["4"],
+        "network_dim": [""],
+        "network_alpha": [""],
+        "unet_lr": [""],
+        "gradient_accumulation_steps": [""],
+        "seed": [""],
+    }
+    overrides = handler._training_overrides(form, strategy="quality")
+    assert overrides == {"training": {"batch_size": 4}}
+    html = handler._training_parameter_help_html()
+    assert "关键训练参数说明" in html
+    assert "不设置人工上限" in html
 
 
 @pytest.mark.parametrize(
