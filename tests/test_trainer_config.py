@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 from pipeline.config import resolve_profiles, write_json_atomic
@@ -37,15 +38,24 @@ def test_sd_scripts_config_defaults_do_not_enable_vpred_or_clip_skip(tmp_path) -
     (prepared / "captions" / "one.txt").write_text(
         "zz_test, 1girl\n", encoding="utf-8"
     )
+    (prepared / "images" / "two.png").write_bytes(b"image-two")
+    (prepared / "captions" / "two.txt").write_text(
+        "zz_test, portrait\n", encoding="utf-8"
+    )
     write_json_atomic(
         prepared / "manifest.json",
         {
             "images": [
                 {
-                    "source": "one.png",
+                    "source": "source-a/one.png",
                     "image": "images/one.png",
                     "caption": "captions/one.txt",
-                }
+                },
+                {
+                    "source": "source-b/two.png",
+                    "image": "images/two.png",
+                    "caption": "captions/two.txt",
+                },
             ]
         },
     )
@@ -89,8 +99,18 @@ def test_sd_scripts_config_defaults_do_not_enable_vpred_or_clip_skip(tmp_path) -
     )
     assert dataset_dir.is_dir()
     assert not any(path.is_symlink() for path in dataset_dir.rglob("*"))
+    dataset_config = tomllib.loads(
+        (run_dir / "config" / "dataset.toml").read_text(encoding="utf-8")
+    )
+    subset_dirs = [
+        Path(subset["image_dir"])
+        for subset in dataset_config["datasets"][0]["subsets"]
+    ]
+    assert subset_dirs == [dataset_dir / "source-a", dataset_dir / "source-b"]
     snapshot = json.loads(
         (run_dir / "config" / "dataset-snapshot.json").read_text(encoding="utf-8")
     )
+    assert snapshot["schema_version"] == 3
+    assert snapshot["subset_directories"] == ["source-a", "source-b"]
     assert snapshot["dataset_snapshot_hash"]
     assert snapshot["captions_hash"]

@@ -10,7 +10,7 @@ import warnings
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Any, Mapping, Sequence, TextIO
 
 from .. import gpu_resources
 from ..config import repository_root, sha256_file, stable_hash, write_json_atomic
@@ -37,10 +37,15 @@ def write_flat_toml(path: Path, values: Mapping[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_dataset_toml(path: Path, *, dataset_dir: Path, merged: Mapping[str, Any]) -> None:
+def write_dataset_toml(
+    path: Path, *, dataset_dirs: Sequence[Path], merged: Mapping[str, Any]
+) -> None:
     resolution = merged.get("resolution", {})
     caption = merged.get("caption", {})
     training = merged.get("training", {})
+    dataset_dirs = tuple(dataset_dirs)
+    if not dataset_dirs:
+        raise PipelineError("Training snapshot has no image-containing subset directories")
     lines = [
         "[general]",
         'caption_extension = ".txt"',
@@ -56,20 +61,28 @@ def write_dataset_toml(path: Path, *, dataset_dir: Path, merged: Mapping[str, An
         f"enable_bucket = {_toml_value(bool(resolution.get('enable_bucket', True)))}",
         f"bucket_no_upscale = {_toml_value(bool(resolution.get('bucket_no_upscale', True)))}",
         f"bucket_reso_steps = {int(resolution.get('bucket_reso_steps', 32))}",
-        "",
-        "  [[datasets.subsets]]",
-        f"  image_dir = {_toml_value(str(dataset_dir))}",
-        "  num_repeats = 1",
     ]
+    for dataset_dir in dataset_dirs:
+        lines.extend(
+            [
+                "",
+                "  [[datasets.subsets]]",
+                f"  image_dir = {_toml_value(str(dataset_dir))}",
+                "  num_repeats = 1",
+            ]
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def materialize_dataset_snapshot(project_dir: Path, target: Path) -> tuple[int, str, str]:
+def materialize_dataset_snapshot(
+    project_dir: Path, target: Path
+) -> tuple[int, str, str, tuple[Path, ...]]:
     generation = load_current_generation(project_dir)
     manifest = generation.manifest
     target.mkdir(parents=True, exist_ok=False)
     snapshot_records: list[dict[str, Any]] = []
+    subset_dirs: set[Path] = set()
     for record in manifest.get("images", []):
         image = generation.root / record["image"]
         caption = generation.root / record["caption"]
@@ -82,6 +95,7 @@ def materialize_dataset_snapshot(project_dir: Path, target: Path) -> tuple[int, 
         image_target = target / relative.parent / unique_name
         caption_target = image_target.with_suffix(".txt")
         image_target.parent.mkdir(parents=True, exist_ok=True)
+        subset_dirs.add(image_target.parent)
         _link_or_copy_immutable(image, image_target)
         _link_or_copy_immutable(caption, caption_target)
         snapshot_records.append(
@@ -103,14 +117,27 @@ def materialize_dataset_snapshot(project_dir: Path, target: Path) -> tuple[int, 
     write_json_atomic(
         target / "snapshot-manifest.json",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "prepared_generation": generation.generation_id,
             "dataset_snapshot_hash": dataset_hash,
             "captions_hash": captions_hash,
+            "subset_directories": [
+                subset.relative_to(target).as_posix()
+                for subset in sorted(
+                    subset_dirs,
+                    key=lambda item: item.relative_to(target).as_posix().casefold(),
+                )
+            ],
             "images": snapshot_records,
         },
     )
-    return len(snapshot_records), dataset_hash, captions_hash
+    ordered_subset_dirs = tuple(
+        sorted(
+            subset_dirs,
+            key=lambda item: item.relative_to(target).as_posix().casefold(),
+        )
+    )
+    return len(snapshot_records), dataset_hash, captions_hash, ordered_subset_dirs
 
 
 def _link_or_copy_immutable(source: Path, destination: Path) -> None:
@@ -357,8 +384,8 @@ class SdScriptsTrainer(TrainerBackend):
         work_checkpoints.mkdir(parents=True, exist_ok=True)
         work_logs.mkdir(parents=True, exist_ok=True)
 
-        image_count, dataset_hash, captions_hash = materialize_dataset_snapshot(
-            request.project_dir, work_dataset
+        image_count, dataset_hash, captions_hash, dataset_dirs = (
+            materialize_dataset_snapshot(request.project_dir, work_dataset)
         )
         shutil.copy2(work_dataset / "snapshot-manifest.json", persistent_config / "dataset-snapshot.json")
 
@@ -415,7 +442,7 @@ class SdScriptsTrainer(TrainerBackend):
         }
         write_flat_toml(persistent_config / "train.toml", train_values)
         write_dataset_toml(
-            persistent_config / "dataset.toml", dataset_dir=work_dataset, merged=merged
+            persistent_config / "dataset.toml", dataset_dirs=dataset_dirs, merged=merged
         )
         output_name = _safe_output_name(
             request.project_dir.name,
