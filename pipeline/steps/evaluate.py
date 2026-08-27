@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..config import load_base_registry, resolve_profiles, sha256_file, stable_hash, write_json_atomic
-from ..dataset.caption_cleaner import parse_caption
+from ..dataset.caption_cleaner import normalize_tag, parse_caption
 from ..dataset.image_info import discover_images
 from ..dataset.style import distribution_summary
 from ..evaluation.character import controllability_proxy, identity_metrics
@@ -20,6 +20,7 @@ from ..evaluation.contact_sheet import (
 )
 from ..evaluation.generation import GenerationBackend, SdScriptsGenerator
 from ..evaluation.leakage import character_trigger_leakage, style_trigger_leakage
+from ..evaluation.outfit import outfit_retention_proxy, outfit_trigger_leakage_proxy
 from ..evaluation.style import cross_content_metrics
 from ..models import GeneratedImage, GenerationCase, PipelineError, StepResult
 from ..prepared import load_current_generation
@@ -44,6 +45,7 @@ def run(
     if stage not in EVALUATION_STAGES:
         raise PipelineError(f"Evaluation stage must be one of {sorted(EVALUATION_STAGES)}")
     project = state.payload["project"]
+    training_target_type = str(project.get("training_target_type", project["type"]))
     run_record = _select_trained_run(state, run_id)
     run_dir = Path(run_record["path"])
     _pipeline_log(
@@ -51,6 +53,7 @@ def run(
         "evaluate.start",
         {
             "concept_type": state.concept_type,
+            "training_target_type": training_target_type,
             "stage": stage,
             "checkpoint_names": checkpoint_names,
         },
@@ -158,6 +161,8 @@ def run(
     metrics: dict[str, Any] = {
         "schema_version": 2,
         "stage": stage,
+        "concept_type": state.concept_type,
+        "training_target_type": training_target_type,
         "automatic_scores_are_ground_truth": False,
         "manual_selection_required": True,
         "generation_settings": settings,
@@ -168,6 +173,7 @@ def run(
             "strengths": strengths,
             "prompts": prompts,
             "positive_and_no_trigger": True,
+            "subject_prompt": subject_prompt,
             "generated_images": len(generated),
         },
         "contact_sheets": {
@@ -179,9 +185,21 @@ def run(
     if state.concept_type == "character":
         metrics["identity"] = identity_metrics(reference_images, generated)
         metrics["prompt_controllability"] = controllability_proxy(generated)
-        metrics["trigger_leakage"] = character_trigger_leakage(
-            reference_images, generated
-        )
+        if training_target_type == "character_outfit":
+            anchor_tags = project.get("caption_anchor_tags", [])
+            metrics["outfit_retention"] = outfit_retention_proxy(generated)
+            metrics["trigger_leakage"] = outfit_trigger_leakage_proxy(
+                generated, anchor_tags=anchor_tags
+            )
+            metrics["outfit_review_note"] = (
+                "CCIP identity remains auxiliary. Outfit fidelity and outfit leakage are "
+                "reviewed on aligned trigger-on/off contact sheets rather than inferred from "
+                "identity similarity."
+            )
+        else:
+            metrics["trigger_leakage"] = character_trigger_leakage(
+                reference_images, generated
+            )
         if reference_source == "training_fallback":
             metrics["identity_warning"] = (
                 "No validation images were supplied; identity scores may reward memorization"
@@ -243,10 +261,12 @@ def run(
     input_hash = stable_hash(
         {
             "stage": stage,
+            "training_target_type": training_target_type,
             "checkpoints": [
                 {"path": str(path), "sha256": sha256_file(path)} for path in checkpoints
             ],
             "settings": settings,
+            "subject_prompt": subject_prompt,
             "prompts": prompts,
             "strengths": strengths,
         }
@@ -256,6 +276,7 @@ def run(
         "evaluate.finished",
         {
             "stage": stage,
+            "training_target_type": training_target_type,
             "generated_images": len(generated),
             "contact_sheets": metrics["contact_sheets"],
             "report": str(report),
@@ -268,6 +289,7 @@ def run(
         details={
             "run_id": run_dir.name,
             "stage": stage,
+            "training_target_type": training_target_type,
             "generated_images": len(generated),
             "contact_sheets": metrics["contact_sheets"],
             "report": str(report),
@@ -329,6 +351,12 @@ def _build_cases(
     subject_prompt: str,
     seed: int,
 ) -> list[GenerationCase]:
+    subject_tags = {normalize_tag(tag) for tag in parse_caption(subject_prompt)}
+    if normalize_tag(trigger) in subject_tags:
+        raise PipelineError(
+            "Evaluation subject prompt must not contain the LoRA trigger; "
+            "trigger-on/off cases add it automatically"
+        )
     cases: list[GenerationCase] = []
     for checkpoint in checkpoints:
         for prompt_index, prompt_id in enumerate(prompt_ids):
@@ -432,7 +460,11 @@ def _write_report(
     payload = {
         "project": state.name,
         "concept_type": state.concept_type,
+        "training_target_type": state.payload["project"].get(
+            "training_target_type", state.concept_type
+        ),
         "trigger": state.payload["project"].get("trigger"),
+        "caption_anchor_tags": state.payload["project"].get("caption_anchor_tags", []),
         "stage": stage,
         "base": {"id": base.id, "filename": base.path.name, "sha256": base.sha256},
         "dataset_stats": inspection.get("summary", {}),

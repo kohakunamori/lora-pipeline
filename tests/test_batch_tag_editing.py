@@ -160,7 +160,8 @@ def test_public_entrypoints_combine_batch_tags_and_composition_metadata() -> Non
     from pipeline.interactive_batch_tags import InteractiveWizard as BatchTagWizard
     from pipeline.interactive_composition import InteractiveWizard as CompositionWizard
     from pipeline.web_full import FullHandler
+    from pipeline.web_metadata_batch import MetadataBatchHandler
 
     assert issubclass(InteractiveWizard, BatchTagWizard)
     assert issubclass(InteractiveWizard, CompositionWizard)
-    assert FullHandler.__module__ == "pipeline.web_metadata_batch"
+    assert issubclass(FullHandler, MetadataBatchHandler)

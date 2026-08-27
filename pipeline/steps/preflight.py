@@ -18,6 +18,7 @@ from ..config import (
     stable_hash,
     write_json_atomic,
 )
+from ..dataset.caption_cleaner import caption_prefix, normalize_tag, parse_caption
 from ..dataset.image_info import inspect_dataset
 from ..models import PipelineError, StepResult
 from ..prepared import load_current_generation
@@ -156,12 +157,20 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
             profiles.hardware.get("caption", {}).get("default_max_token_length", 75),
         )
     )
+    fixed_prefix = caption_prefix(
+        str(project["trigger"]), project.get("caption_anchor_tags", [])
+    )
+    required_normalized = [normalize_tag(tag) for tag in fixed_prefix]
+    enforce_fixed_prefix = project.get("training_target_type") == "character_outfit"
+    missing_trigger_context: list[str] = []
+    missing_anchor_context: dict[str, list[str]] = {}
     trigger_only = 0
     if generation:
         for record in selected:
             caption_path = generation.root / str(record["caption"])
+            source_name = str(record["source"])
             if not caption_path.is_file():
-                missing_captions.append(str(record["source"]))
+                missing_captions.append(source_name)
                 continue
             text = caption_path.read_text(encoding="utf-8", errors="replace").strip()
             counts = count_sdxl_tokens(text)
@@ -169,10 +178,31 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
             clip_g_counts.append(counts.clip_g)
             if not counts.exact and counts.error:
                 fallback_errors.add(counts.error)
+            if enforce_fixed_prefix:
+                present = {normalize_tag(tag) for tag in parse_caption(text)}
+                if required_normalized and required_normalized[0] not in present:
+                    missing_trigger_context.append(source_name)
+                missing_anchors = [
+                    fixed_prefix[index]
+                    for index in range(1, len(required_normalized))
+                    if required_normalized[index] not in present
+                ]
+                if missing_anchors:
+                    missing_anchor_context[source_name] = missing_anchors
             if record.get("caption_source") == "explicit-trigger-only":
                 trigger_only += 1
     if missing_captions:
         blocking.append(f"{len(missing_captions)} prepared image(s) have no caption")
+    if missing_trigger_context:
+        blocking.append(
+            f"Character outfit captions are missing the LoRA trigger in "
+            f"{len(missing_trigger_context)} prepared image(s)"
+        )
+    if missing_anchor_context:
+        blocking.append(
+            f"Character outfit captions are missing required character anchors in "
+            f"{len(missing_anchor_context)} prepared image(s)"
+        )
     truncated_l = sum(value > max_tokens for value in clip_l_counts)
     truncated_g = sum(value > max_tokens for value in clip_g_counts)
     if truncated_l or truncated_g:
@@ -186,7 +216,8 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
             "Cache both SDXL tokenizers and rerun preflight for exact truncation checks."
         )
     if trigger_only:
-        warnings.append(f"{trigger_only} caption(s) explicitly use trigger-only training")
+        label = "trigger/anchor-only" if len(fixed_prefix) > 1 else "trigger-only"
+        warnings.append(f"{trigger_only} caption(s) explicitly use {label} training")
     checks["captions"] = {
         "present": len(clip_l_counts),
         "missing": missing_captions,
@@ -198,6 +229,25 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         "truncated_clip_l": truncated_l,
         "truncated_clip_g": truncated_g,
         "trigger_only": trigger_only,
+        "required_prefix": list(fixed_prefix),
+        "fixed_prefix_enforced": enforce_fixed_prefix,
+        "missing_trigger_context": missing_trigger_context,
+        "missing_anchor_context": missing_anchor_context,
+    }
+
+    subject_prompt = str(project.get("evaluation", {}).get("subject_prompt") or "").strip()
+    subject_tags = {normalize_tag(tag) for tag in parse_caption(subject_prompt)}
+    trigger_normalized = normalize_tag(str(project["trigger"]))
+    evaluation_trigger_contaminated = bool(
+        subject_prompt and trigger_normalized in subject_tags
+    )
+    if evaluation_trigger_contaminated:
+        blocking.append(
+            "Evaluation subject prompt contains the LoRA trigger; trigger-off evaluation would be contaminated"
+        )
+    checks["evaluation_prompt"] = {
+        "subject_prompt": subject_prompt,
+        "contains_trigger": evaluation_trigger_contaminated,
     }
 
     exclusions_path = state.project_dir / "review" / "exclusions.yaml"
@@ -280,6 +330,7 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     checks["training"] = {
         "hardware": profiles.hardware.get("id"),
         "concept": profiles.concept.get("id"),
+        "training_target_type": project.get("training_target_type", project.get("type")),
         "strategy": profiles.training.get("id"),
         "physical_batch": profiles.merged.get("training", {}).get("batch_size"),
         "gradient_accumulation": profiles.merged.get("training", {}).get(

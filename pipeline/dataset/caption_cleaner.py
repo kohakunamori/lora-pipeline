@@ -69,6 +69,28 @@ def normalize_tag(tag: str) -> str:
     return re.sub(r"\s+", " ", tag.replace("_", " ").strip()).casefold()
 
 
+def caption_prefix(trigger: str, anchor_tags: Iterable[str] = ()) -> tuple[str, ...]:
+    """Return the fixed caption prefix that must survive cleaning and pruning.
+
+    The LoRA trigger is always first. Character-outfit anchors follow it and are
+    deduplicated by the same normalized representation used for generated tags.
+    """
+
+    trigger = re.sub(r"\s+", " ", str(trigger).strip())
+    if not trigger:
+        return ()
+    result = [trigger]
+    seen = {normalize_tag(trigger)}
+    for value in anchor_tags:
+        tag = re.sub(r"\s+", " ", str(value).strip())
+        normalized = normalize_tag(tag)
+        if not tag or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(tag)
+    return tuple(result)
+
+
 def estimate_tokens(tags: Iterable[str]) -> int:
     # Used only as a cheap early estimate. Preflight uses both real SDXL tokenizers.
     return sum(max(1, len(re.findall(r"[\w'-]+|[^\w\s]", tag))) + 1 for tag in tags)
@@ -78,6 +100,7 @@ def clean_caption(
     tags: Mapping[str, float] | Iterable[str],
     *,
     trigger: str,
+    anchor_tags: Iterable[str] = (),
     threshold: float = 0.35,
     replacements: Mapping[str, str] | None = None,
     blacklist: Iterable[str] = (),
@@ -103,12 +126,13 @@ def clean_caption(
     else:
         candidates = [(normalize_tag(tag), 1.0) for tag in tags]
 
-    trigger_normalized = normalize_tag(trigger)
+    fixed = caption_prefix(trigger, anchor_tags)
+    fixed_normalized = {normalize_tag(tag) for tag in fixed}
     ordered: list[tuple[str, float]] = []
-    seen: set[str] = set()
+    seen: set[str] = set(fixed_normalized)
     for tag, score in candidates:
         tag = normalize_tag(replacements.get(tag, tag))
-        if not tag or tag in seen or tag in blocked or tag == trigger_normalized:
+        if not tag or tag in seen or tag in blocked:
             continue
         if identity_mode == "exclude" and tag in identity:
             continue
@@ -128,9 +152,10 @@ def clean_caption(
                 item[0],
             )
         )
-    retained = [trigger.strip()] + [tag for tag, _ in ordered]
+    retained = [*fixed, *[tag for tag, _ in ordered]]
+    fixed_count = len(fixed)
     pruned: list[str] = []
-    while len(retained) > 1 and estimate_tokens(retained) > max_token_length:
+    while len(retained) > fixed_count and estimate_tokens(retained) > max_token_length:
         removed = retained.pop()
         pruned.append(removed)
     return CleanCaption(

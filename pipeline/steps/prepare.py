@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from ..config import read_yaml, sha256_file, stable_hash, write_json_atomic
+from ..dataset.caption_cleaner import caption_prefix
 from ..dataset.image_info import discover_images, unique_caption_relative
 from ..models import PipelineError, StepResult
 from ..prepared import generation_path, generations_root, set_current_generation
@@ -27,6 +28,8 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
     generated = project_dir / "review" / "captions" / "generated"
     trigger = str(state.payload["project"]["trigger"])
     project = state.payload["project"]
+    fixed_prefix = caption_prefix(trigger, project.get("caption_anchor_tags", []))
+    fallback_caption = ", ".join(fixed_prefix)
     if allow_trigger_only is not None:
         project["allow_trigger_only"] = bool(allow_trigger_only)
         state.save()
@@ -49,7 +52,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
             caption_bytes = raw_caption.read_bytes()
             caption_source = "existing-passthrough"
         elif allow_fallback:
-            caption_bytes = (trigger + "\n").encode("utf-8")
+            caption_bytes = (fallback_caption + "\n").encode("utf-8")
             caption_source = "explicit-trigger-only"
         else:
             missing.append(relative_text)
@@ -57,8 +60,8 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         caption_text = caption_bytes.decode("utf-8", errors="replace").strip()
         if not caption_text:
             if allow_fallback:
-                caption_bytes = (trigger + "\n").encode("utf-8")
-                caption_text = trigger
+                caption_bytes = (fallback_caption + "\n").encode("utf-8")
+                caption_text = fallback_caption
                 caption_source = "explicit-trigger-only"
             else:
                 missing.append(relative_text)
@@ -96,6 +99,8 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         ],
         "excluded": sorted(exclusions),
         "trigger": trigger,
+        "fixed_prefix": list(fixed_prefix),
+        "training_target_type": project.get("training_target_type", project.get("type")),
         "caption_mode": project.get("caption_mode"),
         "allow_trigger_only": allow_fallback,
     }
@@ -153,6 +158,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
             "generation_path": str(target),
             "current_pointer": str(pointer),
             "reused_generation": reused_generation,
+            "fixed_prefix": list(fixed_prefix),
             "trigger_only_captions": sum(
                 record["caption_source"] == "explicit-trigger-only"
                 for record in planned

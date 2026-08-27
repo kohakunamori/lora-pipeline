@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..config import resolve_profiles, stable_hash, write_json_atomic
-from ..dataset.caption_cleaner import clean_caption, parse_caption
+from ..dataset.caption_cleaner import caption_prefix, clean_caption, parse_caption
 from ..dataset.image_info import discover_images, unique_caption_relative
 from ..dataset.tagger import (
     CachedTagger,
@@ -57,8 +57,14 @@ def run(
         project.get("strategy", "quality"),
         project_overrides=project.get("overrides", {}),
     )
-    caption_config = profiles.concept.get("caption", {})
+    # Use merged caption settings so specialized training targets can add fixed
+    # anchors without creating a second runtime concept profile.
+    caption_config = profiles.merged.get("caption", {})
     tagger_config = profiles.concept.get("tagger", {})
+    fixed_prefix = caption_prefix(
+        str(project["trigger"]),
+        project.get("caption_anchor_tags", caption_config.get("anchor_tags", [])),
+    )
     max_tokens = int(
         profiles.merged.get("caption", {}).get(
             "max_token_length",
@@ -225,6 +231,8 @@ def run(
     manifest = {
         "schema_version": 2,
         "mode": mode,
+        "training_target_type": project.get("training_target_type", project["type"]),
+        "fixed_prefix": list(fixed_prefix),
         "records": records,
         "style_distribution": style_distribution,
         "character_review": character_review,
@@ -246,6 +254,7 @@ def run(
         details={
             "captions": len(records),
             "mode": mode,
+            "fixed_prefix": list(fixed_prefix),
             "dual_tagger_conflict_images": conflict_count,
             "character_review_images": len(character_review["flagged_images"]),
             "tagger_cache_hits": cache_hits,
@@ -304,9 +313,12 @@ def _clean_and_prune(
     max_tokens: int,
     preserve_existing_style_descriptors: bool,
 ) -> tuple[str, list[str], TokenCounts]:
+    anchors = project.get("caption_anchor_tags", caption_config.get("anchor_tags", []))
+    fixed = caption_prefix(str(project["trigger"]), anchors)
     cleaned = clean_caption(
         tags,
         trigger=str(project["trigger"]),
+        anchor_tags=anchors,
         threshold=threshold,
         blacklist=caption_config.get("blacklist", []),
         replacements=caption_config.get("replacements", {}),
@@ -321,9 +333,14 @@ def _clean_and_prune(
     retained = list(cleaned.tags)
     pruned = list(cleaned.pruned)
     counts = count_sdxl_tokens(", ".join(retained))
-    while len(retained) > 1 and counts.maximum > max_tokens:
+    while len(retained) > len(fixed) and counts.maximum > max_tokens:
         pruned.append(retained.pop())
         counts = count_sdxl_tokens(", ".join(retained))
+    if counts.maximum > max_tokens:
+        raise PipelineError(
+            "Required trigger/anchor caption prefix exceeds the configured "
+            f"{max_tokens}-token budget: {', '.join(fixed)}"
+        )
     return ", ".join(retained), pruned, counts
 
 
