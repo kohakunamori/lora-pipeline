@@ -137,6 +137,8 @@ class ProjectState:
             raise StateError(f"Step {name} requires a non-empty input fingerprint")
         record = self.step(name)
         current = StepStatus(record["status"])
+        if record.get("permanent") and current is StepStatus.SKIPPED:
+            return False
         unchanged = record.get("input_hash") == input_hash
         if current in {StepStatus.DONE, StepStatus.SKIPPED} and not force and unchanged:
             return False
@@ -332,15 +334,14 @@ def execute_step(
     except BaseException as exc:
         state.fail(name, exc, log_path=getattr(exc, "log_path", None))
         raise
+    details = dict(result.details)
     if result.input_hash and result.input_hash != input_hash:
-        raise StateError(
-            f"Step {name} returned an input hash different from its precomputed fingerprint"
-        )
+        details.setdefault("handler_input_hash", result.input_hash)
     normalized = StepResult(
         status=result.status,
         input_hash=input_hash,
         output_manifest=result.output_manifest,
-        details=result.details,
+        details=details,
     )
     state.finish(name, normalized)
     return normalized
