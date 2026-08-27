@@ -6,9 +6,55 @@ from typing import Iterable, Mapping
 
 
 STYLE_DESCRIPTOR_PATTERNS = (
-    re.compile(r"\b(?:painterly|painting|lineart|line art|coloring style|shading style)\b", re.I),
-    re.compile(r"\b(?:soft|hard) shading\b", re.I),
+    re.compile(
+        r"\b(?:painterly|painting|oil painting|watercolor|gouache|sketch|lineart|line art|"
+        r"coloring style|shading style|brushwork|cel shading|impasto)\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:soft|hard|flat|dramatic) shading\b", re.I),
 )
+
+CATEGORY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "subject": (
+        re.compile(r"^(?:[1-9](?:girl|boy)|solo|multiple (?:girls|boys)|group|no humans)$"),
+    ),
+    "outfit": (
+        re.compile(
+            r"\b(?:dress|shirt|blouse|skirt|uniform|jacket|coat|pants|shorts|swimsuit|"
+            r"bikini|kimono|armor|boots|shoes|hat|gloves|stockings|hoodie|sweater|tie)\b"
+        ),
+    ),
+    "pose": (
+        re.compile(
+            r"\b(?:sitting|standing|kneeling|lying|running|walking|jumping|crouching|"
+            r"arms? up|hands? on|crossed arms|dynamic pose)\b"
+        ),
+    ),
+    "expression": (
+        re.compile(
+            r"\b(?:smile|grin|frown|crying|tears|angry|blush|open mouth|closed eyes|"
+            r"surprised|expressionless)\b"
+        ),
+    ),
+    "composition": (
+        re.compile(
+            r"\b(?:portrait|close up|upper body|cowboy shot|full body|from above|from below|"
+            r"side view|looking at viewer|looking away|depth of field)\b"
+        ),
+    ),
+    "background": (
+        re.compile(
+            r"\b(?:indoors|outdoors|background|room|street|city|forest|beach|sky|scenery|"
+            r"landscape|school|office|bedroom|nature)\b"
+        ),
+    ),
+    "lighting": (
+        re.compile(
+            r"\b(?:day|night|sunset|sunrise|backlighting|rim light|dramatic lighting|"
+            r"soft lighting|neon|shadow)\b"
+        ),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -24,7 +70,7 @@ def normalize_tag(tag: str) -> str:
 
 
 def estimate_tokens(tags: Iterable[str]) -> int:
-    # Conservative CLIP-oriented estimate: words plus separator overhead.
+    # Used only as a cheap early estimate. Preflight uses both real SDXL tokenizers.
     return sum(max(1, len(re.findall(r"[\w'-]+|[^\w\s]", tag))) + 1 for tag in tags)
 
 
@@ -47,7 +93,11 @@ def clean_caption(
     identity = {normalize_tag(tag) for tag in identity_features}
     if isinstance(tags, Mapping):
         candidates = sorted(
-            ((normalize_tag(tag), float(score)) for tag, score in tags.items() if float(score) >= threshold),
+            (
+                (normalize_tag(tag), float(score))
+                for tag, score in tags.items()
+                if float(score) >= threshold
+            ),
             key=lambda item: (-item[1], item[0]),
         )
     else:
@@ -68,9 +118,16 @@ def clean_caption(
         seen.add(tag)
         ordered.append((tag, score))
 
-    priority = {normalize_tag(value): index for index, value in enumerate(ordering)}
+    order_values = [normalize_tag(value) for value in ordering]
+    priority = {value: index for index, value in enumerate(order_values)}
     if priority:
-        ordered.sort(key=lambda item: (priority.get(item[0], len(priority)), -item[1], item[0]))
+        ordered.sort(
+            key=lambda item: (
+                _semantic_priority(item[0], priority),
+                -item[1],
+                item[0],
+            )
+        )
     retained = [trigger.strip()] + [tag for tag, _ in ordered]
     pruned: list[str] = []
     while len(retained) > 1 and estimate_tokens(retained) > max_token_length:
@@ -86,3 +143,19 @@ def clean_caption(
 
 def parse_caption(text: str) -> list[str]:
     return [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
+
+
+def _semantic_priority(tag: str, priority: Mapping[str, int]) -> int:
+    if tag in priority:
+        return priority[tag]
+    category = _category_for_tag(tag)
+    if category in priority:
+        return priority[category]
+    return len(priority)
+
+
+def _category_for_tag(tag: str) -> str:
+    for category, patterns in CATEGORY_PATTERNS.items():
+        if any(pattern.search(tag) for pattern in patterns):
+            return category
+    return "objects"
