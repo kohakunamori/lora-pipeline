@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -42,23 +43,21 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         generated_caption = generated / caption_relative
         raw_caption = image.with_suffix(".txt")
         if generated_caption.is_file():
-            caption_text = generated_caption.read_text(
-                encoding="utf-8", errors="replace"
-            ).strip()
+            caption_bytes = generated_caption.read_bytes()
             caption_source = "caption-step"
         elif raw_caption.is_file():
-            caption_text = raw_caption.read_text(
-                encoding="utf-8", errors="replace"
-            ).strip()
+            caption_bytes = raw_caption.read_bytes()
             caption_source = "existing-passthrough"
         elif allow_fallback:
-            caption_text = trigger
+            caption_bytes = (trigger + "\n").encode("utf-8")
             caption_source = "explicit-trigger-only"
         else:
             missing.append(relative_text)
             continue
+        caption_text = caption_bytes.decode("utf-8", errors="replace").strip()
         if not caption_text:
             if allow_fallback:
+                caption_bytes = (trigger + "\n").encode("utf-8")
                 caption_text = trigger
                 caption_source = "explicit-trigger-only"
             else:
@@ -69,9 +68,9 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
                 "source": relative_text,
                 "source_image": image,
                 "source_image_sha256": sha256_file(image),
-                "caption_text": caption_text,
+                "caption_bytes": caption_bytes,
                 "caption_source": caption_source,
-                "caption_sha256": stable_hash(caption_text),
+                "caption_sha256": hashlib.sha256(caption_bytes).hexdigest(),
                 "image": (Path("images") / relative).as_posix(),
                 "caption": (Path("captions") / caption_relative).as_posix(),
             }
@@ -91,7 +90,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
             {
                 key: value
                 for key, value in record.items()
-                if key not in {"source_image", "caption_text"}
+                if key not in {"source_image", "caption_bytes"}
             }
             for record in planned
         ],
@@ -125,9 +124,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
                 image_destination.parent.mkdir(parents=True, exist_ok=True)
                 caption_destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(Path(record["source_image"]), image_destination)
-                caption_destination.write_text(
-                    str(record["caption_text"]) + "\n", encoding="utf-8"
-                )
+                caption_destination.write_bytes(bytes(record["caption_bytes"]))
             manifest = {
                 **manifest_basis,
                 "manifest_hash": manifest_hash,
