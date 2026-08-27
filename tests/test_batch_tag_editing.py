@@ -27,7 +27,6 @@ def _workspace(tmp_path: Path) -> tuple[DatasetWorkspace, str, dict[str, str]]:
     (source / "a.txt").write_text("1girl, blue_hair, smile\n", encoding="utf-8")
     (source / "b.txt").write_text("solo, Blue Hair, outdoors\n", encoding="utf-8")
     (source / "c.txt").write_text("portrait\n", encoding="utf-8")
-
     workspace = DatasetWorkspace.create("demo", root=tmp_path)
     record = workspace.add_source_from_directory(source, kind="image_directory", label="images")
     items = {item.relative.name: item.key for item in workspace.items()}
@@ -60,14 +59,12 @@ def _serve(tmp_path: Path):
 
 def test_batch_prepend_moves_existing_semantic_duplicates_to_front(tmp_path: Path) -> None:
     workspace, _, items = _workspace(tmp_path)
-
     result = batch_edit_tags(
         workspace,
         [items["a.png"], items["b.png"]],
         ["blue hair", "trigger", "Trigger"],
         action="prepend",
     )
-
     assert result["changed"] == 2
     assert result["tags"] == ["blue hair", "trigger"]
     assert workspace.caption_text(items["a.png"]) == "blue hair, trigger, 1girl, smile"
@@ -76,7 +73,6 @@ def test_batch_prepend_moves_existing_semantic_duplicates_to_front(tmp_path: Pat
 
 def test_batch_append_moves_existing_tags_to_tail_and_remove_normalizes_names(tmp_path: Path) -> None:
     workspace, _, items = _workspace(tmp_path)
-
     batch_edit_tags(
         workspace,
         [items["a.png"], items["c.png"]],
@@ -85,7 +81,6 @@ def test_batch_append_moves_existing_tags_to_tail_and_remove_normalizes_names(tm
     )
     assert workspace.caption_text(items["a.png"]) == "1girl, blue_hair, smile, masterpiece"
     assert workspace.caption_text(items["c.png"]) == "portrait, smile, masterpiece"
-
     result = batch_edit_tags(
         workspace,
         [items["a.png"], items["b.png"]],
@@ -100,7 +95,6 @@ def test_batch_append_moves_existing_tags_to_tail_and_remove_normalizes_names(tm
 def test_batch_edit_validates_every_key_before_writing(tmp_path: Path) -> None:
     workspace, _, items = _workspace(tmp_path)
     before = workspace.caption_text(items["a.png"])
-
     with pytest.raises(PipelineError, match="Unknown dataset item"):
         batch_edit_tags(
             workspace,
@@ -108,7 +102,6 @@ def test_batch_edit_validates_every_key_before_writing(tmp_path: Path) -> None:
             ["trigger"],
             action="prepend",
         )
-
     assert workspace.caption_text(items["a.png"]) == before
 
 
@@ -137,7 +130,6 @@ def test_web_source_grid_exposes_and_applies_batch_tag_actions(tmp_path: Path) -
         status, headers, _ = _request(server, "POST", "/datasets/demo/bulk", form)
         assert status == 303
         assert headers["Location"].endswith(f"/source/{source_id}")
-
         reloaded = DatasetWorkspace.load("demo", root=tmp_path)
         assert reloaded.caption_text(items["a.png"]) == "trigger, blue hair, 1girl, smile"
         assert reloaded.caption_text(items["b.png"]) == "trigger, blue hair, solo, outdoors"
@@ -163,9 +155,12 @@ def test_web_source_grid_exposes_and_applies_batch_tag_actions(tmp_path: Path) -
         thread.join(timeout=2)
 
 
-def test_public_entrypoints_use_batch_tag_layers() -> None:
+def test_public_entrypoints_combine_batch_tags_and_composition_metadata() -> None:
     from pipeline.interactive import InteractiveWizard
+    from pipeline.interactive_batch_tags import InteractiveWizard as BatchTagWizard
+    from pipeline.interactive_composition import InteractiveWizard as CompositionWizard
     from pipeline.web_full import FullHandler
 
-    assert InteractiveWizard.__module__ == "pipeline.interactive_batch_tags"
-    assert FullHandler.__module__ == "pipeline.web_batch_tags"
+    assert issubclass(InteractiveWizard, BatchTagWizard)
+    assert issubclass(InteractiveWizard, CompositionWizard)
+    assert FullHandler.__module__ == "pipeline.web_metadata_batch"
