@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..budget import resolve_budget
-from ..config import load_base_registry, resolve_profiles, stable_hash
+from ..config import load_base_registry, resolve_profiles, stable_hash, write_yaml_atomic
 from ..models import PipelineError, StepResult, TrainingRequest, TrainingResult
 from ..prepared import load_current_generation
 from ..state import ProjectState
@@ -85,6 +85,7 @@ def run(
         }
         state.payload.setdefault("runs", []).append(run_record)
     run_record["resolved_budget"] = budget.as_dict()
+    _freeze_run_snapshot(state, run_record, run_dir)
     state.save()
 
     backend = backend or SdScriptsTrainer()
@@ -105,6 +106,7 @@ def run(
             "resolved_budget": budget.as_dict(),
             "dry_run": dry_run,
             "resume_state": str(resume_state) if resume_state else None,
+            "snapshot": run_record.get("snapshot"),
         },
     )
     try:
@@ -164,6 +166,9 @@ def run(
             "captions_hash": result.accounting.get("captions_hash"),
             "resolved_budget": budget.as_dict(),
             "resume_state": str(resume_state) if resume_state else None,
+            "training_config_snapshot_hash": run_record.get("snapshot", {}).get(
+                "training_config_snapshot_hash"
+            ),
         }
     )
     step_result = StepResult(
@@ -178,9 +183,67 @@ def run(
             "metrics": dict(result.metrics),
             "dry_run": result.dry_run,
             "resumed": bool(resume_state),
+            "snapshot": dict(run_record.get("snapshot", {})),
         },
     )
     return step_result, result
+
+
+def _freeze_run_snapshot(
+    state: ProjectState,
+    run_record: dict[str, object],
+    run_dir: Path,
+) -> None:
+    """Persist immutable logical inputs for a concrete sd-scripts run.
+
+    The Project workspace is already immutable for Dataset data. This file makes
+    the pairing explicit at Run level and is intentionally not rewritten on
+    resume, even if somebody later edits compatibility Project metadata.
+    """
+
+    manifest = run_dir / "config" / "run-snapshot.yaml"
+    if manifest.is_file():
+        snapshot = run_record.setdefault("snapshot", {})
+        if isinstance(snapshot, dict):
+            snapshot.setdefault("manifest", str(manifest))
+        return
+
+    project = state.payload["project"]
+    dataset_snapshot = project.get("dataset_snapshot")
+    training_config_snapshot = project.get("training_config_snapshot")
+    payload = {
+        "schema_version": 1,
+        "frozen_at": datetime.now(UTC).isoformat(),
+        "project_workspace": state.name,
+        "dataset_snapshot": dataset_snapshot,
+        "training_config_snapshot": training_config_snapshot,
+        "legacy_project_parameters": None
+        if training_config_snapshot
+        else {
+            "type": project.get("type"),
+            "base": project.get("base"),
+            "trigger": project.get("trigger"),
+            "strategy": project.get("strategy"),
+            "hardware": project.get("hardware"),
+            "budget": project.get("budget"),
+            "overrides": project.get("overrides", {}),
+            "interactive_preferences": project.get("interactive_preferences", {}),
+            "evaluation": project.get("evaluation", {}),
+        },
+    }
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    write_yaml_atomic(manifest, payload)
+    run_record["snapshot"] = {
+        "manifest": str(manifest),
+        "dataset_snapshot_hash": (
+            dataset_snapshot.get("snapshot_hash") if isinstance(dataset_snapshot, dict) else None
+        ),
+        "training_config_snapshot_hash": (
+            training_config_snapshot.get("snapshot_hash")
+            if isinstance(training_config_snapshot, dict)
+            else None
+        ),
+    }
 
 
 def _find_run(state: ProjectState, run_id: str) -> dict[str, object]:
