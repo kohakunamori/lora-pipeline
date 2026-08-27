@@ -74,30 +74,26 @@ class VideoProxy:
 
 @dataclass(frozen=True)
 class VideoAuth:
-    """Authentication policy scoped only to the yt-dlp process.
+    """Cookie authentication scoped only to the yt-dlp process.
 
     Cookie contents and absolute cookie-file paths are deliberately excluded from
     provenance so project metadata cannot become an authentication secret store.
     """
 
     mode: str = "none"
-    value: str | None = None
+    cookies_path: str | None = None
 
     def __post_init__(self) -> None:
-        if self.mode not in {"none", "cookies", "browser"}:
+        if self.mode not in {"none", "cookies"}:
             raise PipelineError(f"Unsupported video authentication mode: {self.mode}")
         if self.mode == "cookies":
-            if not self.value:
+            if not self.cookies_path:
                 raise PipelineError("Cookie authentication requires a cookies.txt path")
-            validate_cookies_file(Path(self.value).expanduser())
-        elif self.mode == "browser" and not (self.value or "").strip():
-            raise PipelineError("Browser-cookie authentication requires a browser specification")
+            validate_cookies_file(Path(self.cookies_path).expanduser())
 
     def yt_dlp_args(self) -> list[str]:
         if self.mode == "cookies":
-            return ["--cookies", str(Path(str(self.value)).expanduser().resolve())]
-        if self.mode == "browser":
-            return ["--cookies-from-browser", str(self.value)]
+            return ["--cookies", str(Path(str(self.cookies_path)).expanduser().resolve())]
         return []
 
     def provenance(self) -> dict[str, object]:
@@ -105,11 +101,10 @@ class VideoAuth:
             return {
                 "mode": "cookies_file",
                 "configured": True,
-                "filename": Path(str(self.value)).name,
+                # The basename is useful provenance while avoiding disclosure of
+                # private NAS directory layout. Never persist the file contents.
+                "filename": Path(str(self.cookies_path)).name,
             }
-        if self.mode == "browser":
-            browser = str(self.value).split(":", 1)[0].split("+", 1)[0]
-            return {"mode": "browser", "configured": True, "browser": browser}
         return {"mode": "none", "configured": False}
 
 
