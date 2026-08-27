@@ -57,6 +57,7 @@ class InteractiveWizard(BaseInteractiveWizard):
             self.console.print(self._b("[yellow]没有可编辑图片。[/yellow]", "[yellow]No editable images.[/yellow]"))
             return
 
+        target_items = []
         scope_items = [
             MenuItem(
                 "active",
