@@ -107,8 +107,14 @@ _POSITIVE_INT_KEYS = (
 
 
 def strategy_training_defaults(strategy: str, *, root: Path | None = None) -> dict[str, Any]:
-    base = root or repository_root()
-    payload = read_yaml(base / "profiles" / "training" / f"{strategy}.yaml")
+    requested_base = root or repository_root()
+    profile = requested_base / "profiles" / "training" / f"{strategy}.yaml"
+    if not profile.is_file():
+        bundled_base = Path(__file__).resolve().parents[1]
+        bundled_profile = bundled_base / "profiles" / "training" / f"{strategy}.yaml"
+        if bundled_profile.is_file():
+            profile = bundled_profile
+    payload = read_yaml(profile)
     training = payload.get("training", {})
     if not isinstance(training, Mapping):
         raise PipelineError(f"Training profile {strategy!r} does not contain a training mapping")
