@@ -1,117 +1,161 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 
-from ..config import read_yaml, resolve_profiles, stable_hash, write_json_atomic
-from ..dataset.caption_cleaner import clean_caption, parse_caption
+from ..config import read_yaml, sha256_file, stable_hash, write_json_atomic
 from ..dataset.image_info import discover_images, unique_caption_relative
 from ..models import PipelineError, StepResult
+from ..prepared import generation_path, generations_root, set_current_generation
 from ..state import ProjectState
 
 
-def run(state: ProjectState) -> StepResult:
+def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepResult:
     project_dir = state.project_dir
     raw = project_dir / "raw"
     images = discover_images(raw)
     exclusions_path = project_dir / "review" / "exclusions.yaml"
-    exclusions = set(read_yaml(exclusions_path).get("excluded", [])) if exclusions_path.exists() else set()
+    exclusions = (
+        set(read_yaml(exclusions_path).get("excluded", []))
+        if exclusions_path.exists()
+        else set()
+    )
     generated = project_dir / "review" / "captions" / "generated"
     trigger = str(state.payload["project"]["trigger"])
     project = state.payload["project"]
-    profiles = resolve_profiles(
-        project.get("hardware", "v100_16gb"),
-        project["type"],
-        project.get("strategy", "quality"),
-        project_overrides=project.get("overrides", {}),
-    )
-    caption_config = profiles.concept.get("caption", {})
-    max_tokens = int(profiles.hardware.get("caption", {}).get("default_max_token_length", 75))
-    selected: list[dict[str, str]] = []
-    cache = project_dir / "cache"
-    cache.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix="prepared-", dir=cache))
-    try:
-        image_root = stage / "images"
-        caption_root = stage / "captions"
-        image_root.mkdir(parents=True)
-        caption_root.mkdir(parents=True)
-        for image in images:
-            relative = image.relative_to(raw)
-            relative_text = relative.as_posix()
-            if relative_text in exclusions:
-                continue
-            destination = image_root / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(image, destination)
-            caption_relative = unique_caption_relative(relative)
-            generated_caption = generated / caption_relative
-            raw_caption = image.with_suffix(".txt")
-            if generated_caption.exists():
-                caption_text = generated_caption.read_text(encoding="utf-8", errors="replace").strip()
-                caption_source = "generated"
-            elif raw_caption.exists():
-                caption_text = raw_caption.read_text(encoding="utf-8", errors="replace").strip()
-                caption_source = "existing"
-            else:
+    if allow_trigger_only is not None:
+        project["allow_trigger_only"] = bool(allow_trigger_only)
+        state.save()
+    allow_fallback = bool(project.get("allow_trigger_only", False))
+
+    planned: list[dict[str, object]] = []
+    missing: list[str] = []
+    for image in images:
+        relative = image.relative_to(raw)
+        relative_text = relative.as_posix()
+        if relative_text in exclusions:
+            continue
+        caption_relative = unique_caption_relative(relative)
+        generated_caption = generated / caption_relative
+        raw_caption = image.with_suffix(".txt")
+        if generated_caption.is_file():
+            caption_bytes = generated_caption.read_bytes()
+            caption_source = "caption-step"
+        elif raw_caption.is_file():
+            caption_bytes = raw_caption.read_bytes()
+            caption_source = "existing-passthrough"
+        elif allow_fallback:
+            caption_bytes = (trigger + "\n").encode("utf-8")
+            caption_source = "explicit-trigger-only"
+        else:
+            missing.append(relative_text)
+            continue
+        caption_text = caption_bytes.decode("utf-8", errors="replace").strip()
+        if not caption_text:
+            if allow_fallback:
+                caption_bytes = (trigger + "\n").encode("utf-8")
                 caption_text = trigger
-                caption_source = "trigger-only fallback"
-            cleaned = clean_caption(
-                parse_caption(caption_text),
-                trigger=trigger,
-                blacklist=caption_config.get("blacklist", []),
-                max_token_length=max_tokens,
-                concept_type=project["type"],
-                preserve_existing_style_descriptors=caption_source != "generated",
-                ordering=caption_config.get("ordering", []),
-            )
-            caption_destination = caption_root / caption_relative
-            caption_destination.parent.mkdir(parents=True, exist_ok=True)
-            caption_destination.write_text(cleaned.text + "\n", encoding="utf-8")
-            selected.append(
-                {
-                    "source": relative_text,
-                    "image": destination.relative_to(stage).as_posix(),
-                    "caption": caption_destination.relative_to(stage).as_posix(),
-                    "caption_source": caption_source,
-                    "estimated_tokens": cleaned.estimated_tokens,
-                    "pruned": list(cleaned.pruned),
-                }
-            )
-        if not selected:
-            raise PipelineError("No images remain after exclusions")
-        manifest = {
-            "schema_version": 1,
-            "images": selected,
-            "excluded": sorted(exclusions),
-            "input_hash": stable_hash(
-                {"selected": selected, "excluded": sorted(exclusions), "raw": state.step("inspect").get("input_hash")}
-            ),
-        }
-        write_json_atomic(stage / "manifest.json", manifest)
-        prepared = project_dir / "prepared"
-        backup: Path | None = None
-        if prepared.exists():
-            timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-            backup = cache / "prepare-backups" / timestamp
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(prepared, backup)
-        try:
-            os.replace(stage, prepared)
-        except BaseException:
-            if backup is not None and not prepared.exists():
-                os.replace(backup, prepared)
-            raise
-        stage = Path()
-        manifest_path = prepared / "manifest.json"
-        return StepResult(
-            input_hash=manifest["input_hash"],
-            output_manifest=str(manifest_path),
-            details={"prepared_images": len(selected), "excluded": len(exclusions), "backup": str(backup) if backup else None},
+                caption_source = "explicit-trigger-only"
+            else:
+                missing.append(relative_text)
+                continue
+        planned.append(
+            {
+                "source": relative_text,
+                "source_image": image,
+                "source_image_sha256": sha256_file(image),
+                "caption_bytes": caption_bytes,
+                "caption_source": caption_source,
+                "caption_sha256": hashlib.sha256(caption_bytes).hexdigest(),
+                "image": (Path("images") / relative).as_posix(),
+                "caption": (Path("captions") / caption_relative).as_posix(),
+            }
         )
-    finally:
-        if stage and stage.exists() and stage != Path("."):
-            shutil.rmtree(stage, ignore_errors=True)
+    if missing:
+        preview = ", ".join(missing[:5])
+        raise PipelineError(
+            f"{len(missing)} image(s) have no usable caption ({preview}). "
+            "Run caption, provide sidecars, or explicitly enable --allow-trigger-only."
+        )
+    if not planned:
+        raise PipelineError("No images remain after exclusions")
+
+    manifest_basis = {
+        "schema_version": 2,
+        "images": [
+            {
+                key: value
+                for key, value in record.items()
+                if key not in {"source_image", "caption_bytes"}
+            }
+            for record in planned
+        ],
+        "excluded": sorted(exclusions),
+        "trigger": trigger,
+        "caption_mode": project.get("caption_mode"),
+        "allow_trigger_only": allow_fallback,
+    }
+    manifest_hash = stable_hash(manifest_basis)
+    generation_id = manifest_hash
+    target = generation_path(project_dir, generation_id)
+    manifest_path = target / "manifest.json"
+    reused_generation = target.exists()
+
+    if reused_generation:
+        if not manifest_path.is_file():
+            raise PipelineError(f"Prepared generation exists without a manifest: {target}")
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing.get("manifest_hash") != manifest_hash:
+            raise PipelineError(f"Prepared generation hash collision or corruption: {target}")
+    else:
+        root = generations_root(project_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        cache = project_dir / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix="prepared-generation-", dir=cache))
+        try:
+            for record in planned:
+                image_destination = stage / str(record["image"])
+                caption_destination = stage / str(record["caption"])
+                image_destination.parent.mkdir(parents=True, exist_ok=True)
+                caption_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(Path(record["source_image"]), image_destination)
+                caption_destination.write_bytes(bytes(record["caption_bytes"]))
+            manifest = {
+                **manifest_basis,
+                "manifest_hash": manifest_hash,
+                "generation_id": generation_id,
+            }
+            write_json_atomic(stage / "manifest.json", manifest)
+            os.replace(stage, target)
+            stage = Path()
+        finally:
+            if stage and stage.exists() and stage != Path("."):
+                shutil.rmtree(stage, ignore_errors=True)
+
+    pointer = set_current_generation(
+        project_dir,
+        generation_id=generation_id,
+        manifest_hash=manifest_hash,
+        image_count=len(planned),
+    )
+    return StepResult(
+        input_hash=manifest_hash,
+        output_manifest=str(manifest_path),
+        details={
+            "prepared_images": len(planned),
+            "excluded": len(exclusions),
+            "generation_id": generation_id,
+            "generation_path": str(target),
+            "current_pointer": str(pointer),
+            "reused_generation": reused_generation,
+            "trigger_only_captions": sum(
+                record["caption_source"] == "explicit-trigger-only"
+                for record in planned
+            ),
+        },
+    )

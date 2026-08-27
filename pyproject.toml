@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lora-pipeline"
-version = "0.1.0"
+version = "0.2.0"
 description = "A resumable Illustrious/SDXL LoRA orchestration layer around sd-scripts."
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
   "PyYAML==6.0.3",
   "rich==14.1.0",
   "safetensors==0.4.5",
+  "transformers==4.54.1",
   "typer==0.21.1",
 ]
 

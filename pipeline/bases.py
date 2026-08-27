@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .config import load_base_registry, read_yaml, sha256_file, write_yaml_atomic
+from .config import load_base_registry, read_yaml, repository_root, sha256_file, write_yaml_atomic
 from .models import BaseModel, ConfigurationError, PipelineError
 
 
@@ -33,14 +33,75 @@ def add_base(
         "family": family,
         "prediction_type": prediction_type,
         "sha256": None,
+        "sha256_stat": None,
         "enabled": enabled,
-        "generation_defaults": {"sampler": "euler_a", "scheduler": "normal", "cfg": 4.5, "steps": 28},
+        "generation_defaults": {"sampler": "euler_a", "cfg": 4.5, "steps": 28},
     }
     write_yaml_atomic(registry_path, payload)
     return load_base_registry(root)[base_id]
 
 
-def inspect_base(base_id: str, *, root: Path, persist_sha: bool = True) -> dict[str, Any]:
+def checkpoint_stat_signature(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "inode": stat.st_ino,
+        "device": stat.st_dev,
+    }
+
+
+def resolve_base_sha256(
+    base_id: str,
+    *,
+    root: Path | None = None,
+    full: bool = False,
+    persist: bool = True,
+) -> tuple[str, bool, dict[str, int]]:
+    """Return checkpoint SHA256 and whether a matching stat cache was reused.
+
+    A registered digest is an identity assertion, not a mutable cache. If file
+    content changes, this function returns the new digest but never overwrites
+    the registered identity; the caller can block and require explicit review.
+    """
+
+    root = root or repository_root()
+    registry_path = root / "bases" / "registry.yaml"
+    payload = read_yaml(registry_path) if registry_path.exists() else {"bases": {}}
+    try:
+        item = payload["bases"][base_id]
+    except (KeyError, TypeError) as exc:
+        raise PipelineError(f"Unknown base id: {base_id}") from exc
+    path = Path(str(item.get("path", ""))).expanduser()
+    if not path.is_file():
+        raise PipelineError(f"Checkpoint does not exist: {path}")
+    signature = checkpoint_stat_signature(path)
+    registered_sha = item.get("sha256")
+    cached_stat = item.get("sha256_stat")
+    if not full and registered_sha and cached_stat == signature:
+        return str(registered_sha), True, signature
+    digest = sha256_file(path)
+    if persist:
+        changed = False
+        if not registered_sha:
+            item["sha256"] = digest
+            item["sha256_stat"] = signature
+            changed = True
+        elif digest == registered_sha and cached_stat != signature:
+            item["sha256_stat"] = signature
+            changed = True
+        if changed:
+            write_yaml_atomic(registry_path, payload)
+    return digest, False, signature
+
+
+def inspect_base(
+    base_id: str,
+    *,
+    root: Path,
+    persist_sha: bool = True,
+    full_hash: bool = False,
+) -> dict[str, Any]:
     registry = load_base_registry(root)
     if base_id not in registry:
         raise PipelineError(f"Unknown base id: {base_id}")
@@ -54,8 +115,10 @@ def inspect_base(base_id: str, *, root: Path, persist_sha: bool = True) -> dict[
     with safe_open(base.path, framework="pt", device="cpu") as checkpoint:
         metadata = checkpoint.metadata() or {}
         keys = list(checkpoint.keys())
-    digest = sha256_file(base.path)
-    result = {
+    digest, cache_reused, stat_signature = resolve_base_sha256(
+        base_id, root=root, full=full_hash, persist=persist_sha
+    )
+    return {
         "id": base.id,
         "name": base.name,
         "path": str(base.path),
@@ -65,16 +128,12 @@ def inspect_base(base_id: str, *, root: Path, persist_sha: bool = True) -> dict[
         "sha256": digest,
         "registered_sha256": base.sha256,
         "sha256_matches": base.sha256 in {None, digest},
+        "sha256_cache_reused": cache_reused,
+        "sha256_stat": stat_signature,
         "tensor_count": len(keys),
         "tensor_key_sample": keys[:20],
         "metadata": metadata,
     }
-    if persist_sha and base.sha256 != digest:
-        registry_path = root / "bases" / "registry.yaml"
-        payload = read_yaml(registry_path)
-        payload["bases"][base_id]["sha256"] = digest
-        write_yaml_atomic(registry_path, payload)
-    return result
 
 
 def scan_bases(directory: Path, *, root: Path) -> list[dict[str, Any]]:

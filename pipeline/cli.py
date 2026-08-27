@@ -13,7 +13,15 @@ from .bases import add_base, inspect_base, scan_bases
 from .config import load_base_registry, repository_root
 from .doctor import run_doctor
 from .models import PipelineError, StepResult
-from .service import create_project, load_project, run_remaining, run_single_step
+from .service import (
+    create_project,
+    load_project,
+    run_remaining,
+    run_single_step,
+    skip_preflight_step,
+)
+from .state import ProjectState, project_lock
+from .steps import promote
 from .wizard import Wizard
 
 
@@ -32,7 +40,7 @@ console = Console()
 @app.callback()
 def root_callback(
     ctx: typer.Context,
-    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Show progressively more backend output."),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True),
 ) -> None:
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
@@ -41,21 +49,23 @@ def root_callback(
 
 
 @app.command("doctor")
-def doctor_command(
-    json_output: bool = typer.Option(False, "--json", help="Emit the complete machine-readable report."),
-) -> None:
+def doctor_command(json_output: bool = typer.Option(False, "--json")) -> None:
     def action() -> None:
         result = run_doctor()
         if json_output:
             console.print_json(data=result)
         else:
-            table = Table(title=f"LoRA doctor — {result['status']}")
+            table = Table(title=f"LoRA doctor - {result['status']}")
             table.add_column("Status")
             table.add_column("Check")
             table.add_column("Detail")
             for check in result["checks"]:
                 color = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}[check["status"]]
-                table.add_row(f"[{color}]{check['status']}[/{color}]", check["name"], _compact(check["detail"]))
+                table.add_row(
+                    f"[{color}]{check['status']}[/{color}]",
+                    check["name"],
+                    _compact(check["detail"]),
+                )
             console.print(table)
         if result["status"] != "PASS":
             raise typer.Exit(1)
@@ -66,23 +76,24 @@ def doctor_command(
 @app.command("new")
 def new_command(
     ctx: typer.Context,
-    name: str | None = typer.Option(None, "--name", help="Project name."),
-    concept: str | None = typer.Option(None, "--concept", help="character or style."),
-    base: str | None = typer.Option(None, "--base", help="Registered base id."),
-    dataset: Path | None = typer.Option(None, "--dataset", help="Source dataset directory."),
-    trigger: str | None = typer.Option(None, "--trigger", help="Unique trigger token."),
-    strategy: str = typer.Option("quality", "--strategy", help="quality, fast, or cached."),
-    steps: int = typer.Option(1000, "--steps", min=1, help="Optimizer-step budget."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive creation; all required options must be supplied."),
+    name: str | None = typer.Option(None, "--name"),
+    concept: str | None = typer.Option(None, "--concept", help="character or style"),
+    base: str | None = typer.Option(None, "--base"),
+    dataset: Path | None = typer.Option(None, "--dataset"),
+    trigger: str | None = typer.Option(None, "--trigger"),
+    strategy: str = typer.Option("quality", "--strategy"),
+    images_seen: int = typer.Option(1000, "--images-seen", min=1),
+    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
     def action() -> None:
         verbose = int((ctx.obj or {}).get("verbose", 0))
         if not any((name, concept, base, dataset, trigger)) and not yes:
             Wizard(console=console, verbose=verbose).new_project()
             return
-        missing = [key for key, value in {"name": name, "concept": concept, "base": base, "dataset": dataset, "trigger": trigger}.items() if value is None]
+        supplied = {"name": name, "concept": concept, "base": base, "dataset": dataset, "trigger": trigger}
+        missing = [key for key, value in supplied.items() if value is None]
         if missing:
-            raise PipelineError("Non-interactive project creation is missing: " + ", ".join(missing))
+            raise PipelineError("Project creation is missing: " + ", ".join(missing))
         state = create_project(
             name=str(name),
             concept_type=str(concept),
@@ -90,7 +101,7 @@ def new_command(
             trigger=str(trigger),
             strategy=strategy,
             dataset=Path(dataset),
-            optimizer_steps=steps,
+            images_seen=images_seen,
         )
         console.print(f"[green]Created[/green] {state.project_dir}")
 
@@ -101,18 +112,23 @@ def new_command(
 def open_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Resume immediately without confirmation."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    _invoke(lambda: Wizard(console=console, verbose=int((ctx.obj or {}).get("verbose", 0))).open_project(project, resume=yes))
+    _invoke(
+        lambda: Wizard(
+            console=console, verbose=int((ctx.obj or {}).get("verbose", 0))
+        ).open_project(project, resume=yes)
+    )
 
 
 def _simple_step_command(name: str) -> Callable[..., None]:
     def command(
         ctx: typer.Context,
         project: str = typer.Argument(...),
-        force: bool = typer.Option(False, "--force", help="Repeat a completed step and override a stale project lock."),
-        dry_run: bool = typer.Option(False, "--dry-run", help="Show what would run without changing step state."),
-        yes: bool = typer.Option(False, "--yes", "-y", help="Confirm non-interactively."),
+        force_step: bool = typer.Option(False, "--force-step", "--force"),
+        break_lock: bool = typer.Option(False, "--break-lock"),
+        dry_run: bool = typer.Option(False, "--dry-run"),
+        yes: bool = typer.Option(False, "--yes", "-y"),
     ) -> None:
         del yes
         _invoke(
@@ -121,7 +137,8 @@ def _simple_step_command(name: str) -> Callable[..., None]:
                 run_single_step(
                     load_project(project),
                     name,
-                    force=force,
+                    force=force_step,
+                    break_lock=break_lock,
                     dry_run=dry_run,
                     verbose=int((ctx.obj or {}).get("verbose", 0)),
                 ),
@@ -132,7 +149,7 @@ def _simple_step_command(name: str) -> Callable[..., None]:
     return command
 
 
-for _step_name in ("inspect", "identity", "prepare", "preflight"):
+for _step_name in ("inspect", "identity", "preflight"):
     app.command(_step_name)(_simple_step_command(_step_name))
 
 
@@ -140,63 +157,149 @@ for _step_name in ("inspect", "identity", "prepare", "preflight"):
 def dedup_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    exclude_exact: bool = typer.Option(False, "--exclude-exact", help="Add all but one exact copy to the exclusion manifest."),
-    force: bool = typer.Option(False, "--force"),
+    exclude_exact: bool = typer.Option(False, "--exclude-exact"),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
     dry_run: bool = typer.Option(False, "--dry-run"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    del yes
-    _invoke(lambda: _print_step_result("dedup", run_single_step(load_project(project), "dedup", force=force, dry_run=dry_run, exclude_exact=exclude_exact, verbose=int((ctx.obj or {}).get("verbose", 0)))))
+    _invoke(
+        lambda: _print_step_result(
+            "dedup",
+            run_single_step(
+                load_project(project),
+                "dedup",
+                force=force_step,
+                break_lock=break_lock,
+                dry_run=dry_run,
+                exclude_exact=exclude_exact,
+                verbose=int((ctx.obj or {}).get("verbose", 0)),
+            ),
+        )
+    )
 
 
 @app.command("caption")
 def caption_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    mode: str = typer.Option("generate", "--mode", help="generate, existing, or skip."),
-    force: bool = typer.Option(False, "--force"),
+    mode: str = typer.Option(
+        "generate",
+        "--mode",
+        help="generate, existing_passthrough, existing_taglist_clean, hybrid, or skip",
+    ),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
     dry_run: bool = typer.Option(False, "--dry-run"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    del yes
-    _invoke(lambda: _print_step_result("caption", run_single_step(load_project(project), "caption", force=force, dry_run=dry_run, caption_mode=mode, verbose=int((ctx.obj or {}).get("verbose", 0)))))
+    _invoke(
+        lambda: _print_step_result(
+            "caption",
+            run_single_step(
+                load_project(project),
+                "caption",
+                force=force_step,
+                break_lock=break_lock,
+                dry_run=dry_run,
+                caption_mode=mode,
+                verbose=int((ctx.obj or {}).get("verbose", 0)),
+            ),
+        )
+    )
 
 
 @app.command("review")
 def review_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    exclude: list[str] | None = typer.Option(None, "--exclude", help="Raw-relative image path to exclude; repeatable."),
-    force: bool = typer.Option(False, "--force"),
+    exclude: list[str] | None = typer.Option(None, "--exclude"),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
     dry_run: bool = typer.Option(False, "--dry-run"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    del yes
-    _invoke(lambda: _print_step_result("review", run_single_step(load_project(project), "review", force=force, dry_run=dry_run, exclusions=exclude or [], verbose=int((ctx.obj or {}).get("verbose", 0)))))
+    _invoke(
+        lambda: _print_step_result(
+            "review",
+            run_single_step(
+                load_project(project),
+                "review",
+                force=force_step,
+                break_lock=break_lock,
+                dry_run=dry_run,
+                exclusions=exclude or [],
+                verbose=int((ctx.obj or {}).get("verbose", 0)),
+            ),
+        )
+    )
+
+
+@app.command("prepare")
+def prepare_command(
+    ctx: typer.Context,
+    project: str = typer.Argument(...),
+    allow_trigger_only: bool = typer.Option(False, "--allow-trigger-only"),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    _invoke(
+        lambda: _print_step_result(
+            "prepare",
+            run_single_step(
+                load_project(project),
+                "prepare",
+                force=force_step,
+                break_lock=break_lock,
+                dry_run=dry_run,
+                allow_trigger_only=allow_trigger_only,
+                verbose=int((ctx.obj or {}).get("verbose", 0)),
+            ),
+        )
+    )
 
 
 @app.command("train")
 def train_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    steps: int | None = typer.Option(None, "--steps", min=1, help="Override this run's optimizer-step budget."),
-    skip_preflight: bool = typer.Option(False, "--skip-preflight", help="Expert bypass; recorded with a warning."),
-    force: bool = typer.Option(False, "--force"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Generate run configs without launching sd-scripts."),
-    yes: bool = typer.Option(False, "--yes", "-y"),
+    images_seen: int | None = typer.Option(None, "--images-seen", min=1),
+    legacy_steps: int | None = typer.Option(None, "--steps", min=1, hidden=True),
+    resume_run: str | None = typer.Option(None, "--resume"),
+    skip_preflight: bool = typer.Option(False, "--skip-preflight"),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    del yes
-
     def action() -> None:
         state = load_project(project)
-        if state.status("preflight").value != "done":
-            if skip_preflight:
-                console.print("[bold yellow]WARNING:[/bold yellow] preflight explicitly bypassed; this is recorded in project.yaml")
-                state.skip_preflight("expert --skip-preflight override")
-            elif not dry_run:
-                _print_step_result("preflight", run_single_step(state, "preflight", force=force, verbose=int((ctx.obj or {}).get("verbose", 0))))
-                state = load_project(project)
-        result = run_single_step(state, "train", force=force, dry_run=dry_run, optimizer_steps=steps, verbose=int((ctx.obj or {}).get("verbose", 0)))
+        if skip_preflight:
+            console.print("[bold yellow]WARNING:[/bold yellow] preflight bypass recorded")
+            _print_step_result(
+                "preflight", skip_preflight_step(state, break_lock=break_lock)
+            )
+            state = load_project(project)
+            lock_override = False
+        else:
+            preflight_result = run_single_step(
+                state,
+                "preflight",
+                break_lock=break_lock,
+                verbose=int((ctx.obj or {}).get("verbose", 0)),
+            )
+            if not preflight_result.details.get("reused"):
+                _print_step_result("preflight", preflight_result)
+            state = load_project(project)
+            lock_override = False
+        result = run_single_step(
+            state,
+            "train",
+            force=force_step,
+            break_lock=lock_override,
+            dry_run=dry_run,
+            images_seen=images_seen,
+            optimizer_steps=legacy_steps,
+            resume_run=resume_run,
+            verbose=int((ctx.obj or {}).get("verbose", 0)),
+        )
         _print_step_result("train", result)
 
     _invoke(action)
@@ -206,22 +309,65 @@ def train_command(
 def evaluate_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    force: bool = typer.Option(False, "--force"),
+    stage: str = typer.Option("screening", "--stage", help="screening or full"),
+    run_id: str | None = typer.Option(None, "--run"),
+    checkpoint: list[str] | None = typer.Option(None, "--checkpoint"),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
     dry_run: bool = typer.Option(False, "--dry-run"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    del yes
-    _invoke(lambda: _print_step_result("evaluate", run_single_step(load_project(project), "evaluate", force=force, dry_run=dry_run, verbose=int((ctx.obj or {}).get("verbose", 0)))))
+    _invoke(
+        lambda: _print_step_result(
+            "evaluate",
+            run_single_step(
+                load_project(project),
+                "evaluate",
+                force=force_step,
+                break_lock=break_lock,
+                dry_run=dry_run,
+                evaluation_stage=stage,
+                evaluation_run=run_id,
+                evaluation_checkpoints=checkpoint or [],
+                verbose=int((ctx.obj or {}).get("verbose", 0)),
+            ),
+        )
+    )
+
+
+@app.command("promote")
+def promote_command(
+    project: str = typer.Argument(...),
+    run_id: str = typer.Option(..., "--run"),
+    checkpoint: str = typer.Option(..., "--checkpoint"),
+    strength: float = typer.Option(..., "--strength", min=0.01),
+    allow_unreviewed: bool = typer.Option(False, "--allow-unreviewed"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+) -> None:
+    def action() -> None:
+        state = load_project(project)
+        with project_lock(state.project_dir, break_lock=break_lock):
+            payload = promote.run(
+                ProjectState.load(state.project_dir),
+                run_id=run_id,
+                checkpoint_name=checkpoint,
+                strength=strength,
+                allow_unreviewed=allow_unreviewed,
+            )
+        console.print_json(data=payload)
+
+    _invoke(action)
 
 
 @app.command("run")
 def run_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Run without interactive confirmation."),
-    force: bool = typer.Option(False, "--force", help="Repeat completed steps."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only the next actionable step."),
-    caption_mode: str = typer.Option("generate", "--caption-mode", help="generate, existing, or skip."),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    caption_mode: str = typer.Option("generate", "--caption-mode"),
+    images_seen: int | None = typer.Option(None, "--images-seen", min=1),
+    allow_trigger_only: bool = typer.Option(False, "--allow-trigger-only"),
     exclude_exact: bool = typer.Option(False, "--exclude-exact"),
     skip_dedup: bool = typer.Option(False, "--skip-dedup"),
     skip_identity: bool = typer.Option(False, "--skip-identity"),
@@ -230,8 +376,6 @@ def run_command(
     skip_preflight: bool = typer.Option(False, "--skip-preflight"),
     skip_evaluate: bool = typer.Option(False, "--skip-evaluate"),
 ) -> None:
-    del yes
-
     def action() -> None:
         skip = {
             name
@@ -245,14 +389,17 @@ def run_command(
             if enabled
         }
         if skip_preflight:
-            console.print("[bold yellow]WARNING:[/bold yellow] preflight will be bypassed and recorded")
+            console.print("[bold yellow]WARNING:[/bold yellow] preflight bypass recorded")
         results = run_remaining(
             load_project(project),
             skip=skip,
             skip_preflight=skip_preflight,
-            force=force,
+            force=force_step,
+            break_lock=break_lock,
             dry_run=dry_run,
             caption_mode="skip" if skip_caption else caption_mode,
+            images_seen=images_seen,
+            allow_trigger_only=allow_trigger_only,
             exclude_exact=exclude_exact,
             verbose=int((ctx.obj or {}).get("verbose", 0)),
         )
@@ -272,7 +419,13 @@ def base_list_command() -> None:
         table.add_column("SHA256")
         table.add_column("Path")
         for base_id, base in load_base_registry().items():
-            table.add_row(base_id, base.name, base.family, (base.sha256 or "uninspected")[:16], str(base.path))
+            table.add_row(
+                base_id,
+                base.name,
+                base.family,
+                (base.sha256 or "uninspected")[:16],
+                str(base.path),
+            )
         console.print(table)
 
     _invoke(action)
@@ -285,18 +438,40 @@ def base_add_command(
     name: str | None = typer.Option(None, "--name"),
     family: str = typer.Option("illustrious_sdxl", "--family"),
     prediction_type: str = typer.Option("epsilon", "--prediction-type"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    del yes
-    _invoke(lambda: console.print(f"[green]Registered[/green] {add_base(base_id, path, name=name, family=family, prediction_type=prediction_type, root=repository_root()).id}"))
+    _invoke(
+        lambda: console.print(
+            f"[green]Registered[/green] "
+            f"{add_base(base_id, path, name=name, family=family, prediction_type=prediction_type, root=repository_root()).id}"
+        )
+    )
 
 
 @base_app.command("inspect")
 def base_inspect_command(
     base_id: str = typer.Argument(...),
-    no_persist: bool = typer.Option(False, "--no-persist", help="Do not update a missing/outdated registry SHA256."),
+    no_persist: bool = typer.Option(False, "--no-persist"),
+    full_hash: bool = typer.Option(False, "--full-hash"),
 ) -> None:
-    _invoke(lambda: console.print_json(data=inspect_base(base_id, root=repository_root(), persist_sha=not no_persist)))
+    _invoke(
+        lambda: console.print_json(
+            data=inspect_base(
+                base_id,
+                root=repository_root(),
+                persist_sha=not no_persist,
+                full_hash=full_hash,
+            )
+        )
+    )
+
+
+@base_app.command("verify")
+def base_verify_command(base_id: str = typer.Argument(...)) -> None:
+    _invoke(
+        lambda: console.print_json(
+            data=inspect_base(base_id, root=repository_root(), full_hash=True)
+        )
+    )
 
 
 @base_app.command("scan")
@@ -305,13 +480,21 @@ def base_scan_command(directory: Path = typer.Argument(...)) -> None:
 
 
 def _print_step_result(name: str, result: StepResult) -> None:
-    color = "yellow" if result.status.value == "skipped" else "green"
-    console.print(Panel.fit(f"[{color}]{name}: {result.status.value}[/{color}]\n{_compact(dict(result.details))}"))
+    color = "yellow" if result.status.value in {"skipped", "interrupted"} else "green"
+    console.print(
+        Panel.fit(
+            f"[{color}]{name}: {result.status.value}[/{color}]\n{_compact(dict(result.details))}"
+        )
+    )
 
 
-def _compact(value: Any, limit: int = 240) -> str:
-    text = json.dumps(value, ensure_ascii=False, default=str, sort_keys=True) if not isinstance(value, str) else value
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+def _compact(value: Any, limit: int = 300) -> str:
+    text = (
+        json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+        if not isinstance(value, str)
+        else value
+    )
+    return text if len(text) <= limit else text[: limit - 1] + "..."
 
 
 def _invoke(action: Callable[[], Any]) -> Any:

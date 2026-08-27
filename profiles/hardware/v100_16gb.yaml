@@ -26,5 +26,14 @@ resolution:
 caption:
   default_max_token_length: 75
 
+data_loader:
+  workers: 0
+  persistent_workers: false
+  cpu_threads_per_process: 1
+
+storage:
+  # Set this to a local SSD/NVMe path on the NAS only after validating it.
+  scratch_root: null
+
 limits:
   max_physical_batch_1024: 2

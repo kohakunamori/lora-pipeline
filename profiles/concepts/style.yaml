@@ -45,12 +45,18 @@ distribution:
   bias_warning:
     dominant_subject_fraction: 0.8
     portrait_fraction: 0.8
-    message: Potential subject/composition bias
+    simple_background_fraction: 0.8
+    minimum_multiple_people_fraction: 0.05
 
 evaluation:
   identity: false
   leakage: true
   strengths: [0.4, 0.6, 0.8, 1.0]
+  screening_strengths: [0.6, 0.8, 1.0]
+  screening_prompts:
+    - female portrait
+    - male portrait
+    - landscape
   prompts:
     - female portrait
     - male portrait
