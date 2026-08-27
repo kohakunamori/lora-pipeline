@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -92,8 +93,8 @@ def test_interrupted_run_resumes_from_latest_sd_scripts_state(tmp_path, monkeypa
     latest_state = run_dir / "checkpoints" / "000200-state"
     old_state.mkdir(parents=True)
     latest_state.mkdir()
-    old_state.touch()
-    latest_state.touch()
+    os.utime(old_state, (100, 100))
+    os.utime(latest_state, (200, 200))
     state.payload["runs"].append(
         {
             "id": "run-1",
