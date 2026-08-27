@@ -196,21 +196,3 @@ def validate_safety(
             )
         if not training_values.get("network_train_unet_only", False):
             raise ConfigurationError("Text-encoder output caching requires U-Net-only network training")
-
-    unet_only = bool(training_values.get("network_train_unet_only", True))
-    text_encoder_lrs = (
-        training_values.get("text_encoder_lr1"),
-        training_values.get("text_encoder_lr2"),
-    )
-    if unet_only:
-        if any(value is not None for value in text_encoder_lrs):
-            raise ConfigurationError(
-                "Text-encoder learning rates require network_train_unet_only=false"
-            )
-    else:
-        if any(value is None for value in text_encoder_lrs):
-            raise ConfigurationError(
-                "SDXL text-encoder training requires text_encoder_lr1 and text_encoder_lr2"
-            )
-        if any(float(value) <= 0 for value in text_encoder_lrs):
-            raise ConfigurationError("Text-encoder learning rates must be positive")
