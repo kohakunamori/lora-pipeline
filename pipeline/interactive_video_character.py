@@ -152,56 +152,58 @@ class InteractiveWizard(BaseInteractiveWizard):
             ]
         )
         default = f"cluster:{identity_report.clusters[0].cluster_id}"
-        choice = self._menu(self._b("目标人物", "Target character"), items, default=default)
-        if choice == "cancel":
-            raise PipelineError(self._b("已取消视频导入", "Video import cancelled"))
+        base_cluster_payload = identity_report.as_dict(root=identity_dir)
+        while True:
+            choice = self._menu(self._b("目标人物", "Target character"), items, default=default)
+            if choice == "cancel":
+                raise PipelineError(self._b("已取消视频导入", "Video import cancelled"))
 
-        cluster_payload = identity_report.as_dict(root=identity_dir)
-        if choice == "all":
-            if not self._confirm(
-                self._b(
-                    "确定保留所有人物簇和 CCIP 离群候选吗？这可能把其他角色带进训练集。",
-                    "Keep every cluster and CCIP outlier? This may introduce other characters into training.",
-                ),
-                default=False,
-            ):
-                return self._select_video_identity(frame_dir)
-            selected_paths = [subject.identity_path for subject in subject_report.subjects]
+            cluster_payload = dict(base_cluster_payload)
+            if choice == "all":
+                if not self._confirm(
+                    self._b(
+                        "确定保留所有人物簇和 CCIP 离群候选吗？这可能把其他角色带进训练集。",
+                        "Keep every cluster and CCIP outlier? This may introduce other characters into training.",
+                    ),
+                    default=False,
+                ):
+                    continue
+                selected_paths = [subject.identity_path for subject in subject_report.subjects]
+                cluster_payload.update(
+                    {
+                        "status": "kept_all_detected_subjects",
+                        "selected_cluster": None,
+                        "selected_subjects": len(selected_paths),
+                    }
+                )
+                return self._build_training_from_subjects(
+                    subject_report,
+                    selected_paths,
+                    cluster_payload=cluster_payload,
+                )
+
+            cluster_id = int(choice.split(":", 1)[1])
+            selected = next(
+                cluster for cluster in identity_report.clusters if cluster.cluster_id == cluster_id
+            )
             cluster_payload.update(
                 {
-                    "status": "kept_all_detected_subjects",
-                    "selected_cluster": None,
-                    "selected_subjects": len(selected_paths),
+                    "status": "selected_crop_cluster",
+                    "selected_cluster": cluster_id,
+                    "selected_subjects": selected.size,
+                    "discarded_other_clusters": sum(
+                        cluster.size
+                        for cluster in identity_report.clusters
+                        if cluster.cluster_id != cluster_id
+                    ),
+                    "discarded_outliers": len(identity_report.outliers),
                 }
             )
             return self._build_training_from_subjects(
                 subject_report,
-                selected_paths,
+                selected.frames,
                 cluster_payload=cluster_payload,
             )
-
-        cluster_id = int(choice.split(":", 1)[1])
-        selected = next(
-            cluster for cluster in identity_report.clusters if cluster.cluster_id == cluster_id
-        )
-        cluster_payload.update(
-            {
-                "status": "selected_crop_cluster",
-                "selected_cluster": cluster_id,
-                "selected_subjects": selected.size,
-                "discarded_other_clusters": sum(
-                    cluster.size
-                    for cluster in identity_report.clusters
-                    if cluster.cluster_id != cluster_id
-                ),
-                "discarded_outliers": len(identity_report.outliers),
-            }
-        )
-        return self._build_training_from_subjects(
-            subject_report,
-            selected.frames,
-            cluster_payload=cluster_payload,
-        )
 
     def _build_training_from_subjects(
         self,
