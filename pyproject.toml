@@ -22,7 +22,7 @@ dependencies = [
 
 [project.scripts]
 lora-pipeline = "pipeline.interactive:main"
-lora-pipeline-web = "pipeline.web_app:main"
+lora-pipeline-web = "pipeline.web_full:main"
 
 [tool.setuptools.packages.find]
 include = ["pipeline*"]
