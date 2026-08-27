@@ -20,6 +20,7 @@ from .video_color import (
     probe_video_color,
     sampling_filter,
 )
+from .video_frame_selection import try_sample_sharp_windows
 
 
 _PROXY_ENV_NAMES = (
@@ -394,6 +395,20 @@ def _sample_frames(
     frame_cap: int,
 ) -> VideoColorInfo:
     color_info = probe_video_color(video_path)
+
+    # Prefer a small nearby burst and choose the least blurry decoded frame. This
+    # improves screenshots at motion/transition boundaries without sharpening or
+    # inventing detail. Older FFmpeg builds without blurdetect automatically keep
+    # the fixed-timestamp behavior below.
+    if try_sample_sharp_windows(
+        video_path,
+        output_dir,
+        color_info=color_info,
+        interval_seconds=interval_seconds,
+        frame_cap=frame_cap,
+    ):
+        return color_info
+
     filter_chain = sampling_filter(interval_seconds, color_info)
     command = [
         "ffmpeg",

@@ -133,28 +133,37 @@ def probe_video_color(video_path: Path) -> VideoColorInfo:
     )
 
 
+def color_normalization_filters(color: VideoColorInfo) -> tuple[str, ...]:
+    """Return only the HDR-to-SDR normalization filters, without temporal sampling.
+
+    Frame selection can therefore score low-resolution nearby candidates first and
+    apply the exact same color conversion only to the full-resolution frame that is
+    finally chosen. SDR inputs need no color-normalization filters.
+    """
+
+    if not color.is_hdr:
+        return ()
+
+    # zscale converts the HDR transfer function to scene-linear light. The gamut is
+    # brought into BT.709 before Mobius compresses highlights. desat=0 is deliberate:
+    # anime footage often contains saturated emissive colors and automatic highlight
+    # desaturation can make character colors look pale. The final JPEG path is full
+    # range BT.709.
+    return (
+        f"zscale=t=linear:npl={_TARGET_NITS}",
+        "format=gbrpf32le",
+        f"zscale=p={_TARGET_COLORSPACE}",
+        f"tonemap={_TONEMAP_ALGORITHM}:param={_TONEMAP_PARAMETER}:desat=0",
+        f"zscale=t={_TARGET_COLORSPACE}:m={_TARGET_COLORSPACE}:r=full",
+        "format=yuvj444p",
+    )
+
+
 def sampling_filter(interval_seconds: int, color: VideoColorInfo) -> str:
     """Build the frame-sampling filter; HDR sources are normalized to SDR BT.709 first."""
 
     filters = [f"fps=1/{interval_seconds}"]
-    if not color.is_hdr:
-        return ",".join(filters)
-
-    # zscale converts the HDR transfer function to scene-linear light.  The gamut is
-    # brought into BT.709 before Mobius compresses highlights.  desat=0 is deliberate:
-    # anime footage often contains saturated emissive colors and automatic highlight
-    # desaturation can make character colors look pale.  The final JPEG path is full
-    # range BT.709.  Small/normal SDR videos never enter this chain.
-    filters.extend(
-        [
-            f"zscale=t=linear:npl={_TARGET_NITS}",
-            "format=gbrpf32le",
-            f"zscale=p={_TARGET_COLORSPACE}",
-            f"tonemap={_TONEMAP_ALGORITHM}:param={_TONEMAP_PARAMETER}:desat=0",
-            f"zscale=t={_TARGET_COLORSPACE}:m={_TARGET_COLORSPACE}:r=full",
-            "format=yuvj444p",
-        ]
-    )
+    filters.extend(color_normalization_filters(color))
     return ",".join(filters)
 
 
