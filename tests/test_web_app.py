@@ -110,7 +110,7 @@ def test_web_imports_directory_as_separate_source(tmp_path: Path) -> None:
                 "label": "official",
             }
         )
-        status, headers, _ = _request(server, "POST", "/datasets/demo/import-dir", form)
+        status, headers, _ = _request(server, "POST", "/dataset-tools/demo/import-dir", form)
         assert status == 303
         assert headers["Location"] == "/datasets/demo"
         workspace = DatasetWorkspace.load("demo", root=tmp_path)
