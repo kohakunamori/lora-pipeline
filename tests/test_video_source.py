@@ -27,7 +27,7 @@ def test_extract_video_frames_filters_near_duplicates(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(
         video_source,
         "_resolve_video",
-        lambda source, temporary_dir, remote: Path(source),
+        lambda source, temporary_dir, remote, proxy: Path(source),
     )
 
     def fake_sample(video_path, output_dir, *, interval_seconds, frame_cap):
@@ -50,6 +50,7 @@ def test_extract_video_frames_filters_near_duplicates(tmp_path, monkeypatch) -> 
     assert report.sampled_frames == 3
     assert report.accepted_frames == 2
     assert report.rejected_near_duplicate == 1
+    assert report.proxy is None
     assert len(list(output.glob("*.jpg"))) == 2
 
 
@@ -63,3 +64,38 @@ def test_url_detection_accepts_http_and_rejects_paths() -> None:
     assert video_source.is_url("https://www.youtube.com/watch?v=abc")
     assert video_source.is_url("http://example.com/video.mp4")
     assert not video_source.is_url("/mnt/media/video.mp4")
+
+
+def test_custom_proxy_is_scoped_to_ytdlp_and_redacted() -> None:
+    proxy = video_source.VideoProxy(
+        mode="custom",
+        url="socks5://alice:secret@127.0.0.1:1080",
+    )
+    assert proxy.yt_dlp_args() == [
+        "--proxy",
+        "socks5://alice:secret@127.0.0.1:1080",
+    ]
+    assert proxy.provenance() == {
+        "mode": "custom",
+        "configured": True,
+        "endpoint": "socks5://127.0.0.1:1080",
+    }
+
+
+def test_direct_proxy_mode_explicitly_ignores_environment() -> None:
+    proxy = video_source.VideoProxy(mode="direct")
+    assert proxy.yt_dlp_args() == ["--proxy", ""]
+    assert proxy.provenance()["configured"] is False
+
+
+def test_environment_proxy_prefers_lora_specific_override(monkeypatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://generic-proxy:8080")
+    monkeypatch.setenv("LORA_VIDEO_PROXY", "http://video-proxy:7890")
+    name, value = video_source.detect_environment_proxy()
+    assert name == "LORA_VIDEO_PROXY"
+    assert value == "http://video-proxy:7890"
+
+
+def test_proxy_validation_rejects_unsupported_scheme() -> None:
+    with pytest.raises(PipelineError, match="Proxy URL"):
+        video_source.VideoProxy(mode="custom", url="ftp://127.0.0.1:21")
