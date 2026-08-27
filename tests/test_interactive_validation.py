@@ -74,3 +74,30 @@ def test_interactive_validation_import_blocks_exact_training_overlap(
         wizard.import_validation_images(state.name)
 
     assert not list((state.project_dir / "validation").glob("*.png"))
+
+
+def test_interactive_budget_change_invalidates_only_training_dependent_steps(
+    tmp_path, monkeypatch
+) -> None:
+    state = _project(tmp_path, monkeypatch)
+    state.payload["project"]["budget"] = {"unit": "images_seen", "value": 1000}
+    for step in ("prepare", "preflight", "train", "evaluate"):
+        state.payload["steps"][step].update(
+            {"status": "done", "input_hash": f"old-{step}"}
+        )
+    state.save()
+    wizard = _wizard()
+    menu_answers = iter(["budget", "back"])
+    monkeypatch.setattr(wizard, "_menu", lambda *args, **kwargs: next(menu_answers))
+    monkeypatch.setattr(wizard, "_ask_positive_int", lambda *args, **kwargs: 2400)
+
+    wizard.project_settings(state.name)
+
+    reloaded = ProjectState.load(state.project_dir)
+    assert reloaded.payload["project"]["budget"] == {
+        "unit": "images_seen",
+        "value": 2400,
+    }
+    assert reloaded.status("prepare") is StepStatus.DONE
+    for step in ("preflight", "train", "evaluate"):
+        assert reloaded.status(step) is StepStatus.PENDING
