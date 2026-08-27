@@ -4,6 +4,7 @@ import sys
 
 from .i18n import initialize_interactive
 from .interactive_video_auth import InteractiveWizard
+from .tty_compat import configure_interactive_input
 
 
 def main() -> None:
@@ -12,6 +13,7 @@ def main() -> None:
 
         cli_main()
         return
+    configure_interactive_input()
     initialize_interactive()
     InteractiveWizard().home()
 
