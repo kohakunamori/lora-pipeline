@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .web_routes import FullHandler, main, make_server, serve
+from .web_safety import FullHandler, main, make_server, serve
 
 __all__ = ["FullHandler", "make_server", "serve", "main"]
 
