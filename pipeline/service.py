@@ -231,7 +231,26 @@ def run_remaining(
             continue
         if on_step is not None:
             on_step(name)
-        if name in skip:
+        if dry_run and name in skip:
+            result = StepResult(
+                status=StepStatus.SKIPPED,
+                details={
+                    "dry_run": True,
+                    "would_skip": name,
+                    "reason": "explicitly skipped by run command",
+                },
+            )
+        elif dry_run and name == "preflight" and skip_preflight:
+            result = StepResult(
+                status=StepStatus.SKIPPED,
+                details={
+                    "dry_run": True,
+                    "would_skip": "preflight",
+                    "reason": "expert --skip-preflight override",
+                    "warning": True,
+                },
+            )
+        elif name in skip:
             result = skip_optional_step(
                 state,
                 name,
