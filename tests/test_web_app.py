@@ -9,7 +9,9 @@ from PIL import Image
 
 from pipeline.dataset_workspace import DatasetWorkspace
 from pipeline.state import ProjectState
-from pipeline.web_app import _safe_child, _training_command, make_server
+from pipeline.web_app import _safe_child, _training_command
+from pipeline.web_full import make_server
+from pipeline.web_jobs import create_job, read_job
 
 
 def _request(server, method: str, path: str, body: str | None = None):
@@ -29,6 +31,29 @@ def _request(server, method: str, path: str, body: str | None = None):
     return response.status, headers_out, data
 
 
+def _serve(tmp_path: Path):
+    server = make_server("127.0.0.1", 0, root=tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_web_can_create_dataset(tmp_path: Path) -> None:
+    server, thread = _serve(tmp_path)
+    try:
+        csrf = server.RequestHandlerClass.app.csrf
+        form = urlencode({"_csrf": csrf, "name": "new-dataset", "concept_type": "character"})
+        status, headers, _ = _request(server, "POST", "/datasets/create", form)
+        assert status == 303
+        assert headers["Location"] == "/datasets/new-dataset"
+        workspace = DatasetWorkspace.load("new-dataset", root=tmp_path)
+        assert workspace.concept_type == "character"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_web_dataset_grid_and_exclusion(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -37,9 +62,7 @@ def test_web_dataset_grid_and_exclusion(tmp_path: Path) -> None:
     record = workspace.add_source_from_directory(source, kind="image_directory", label="images")
     source_id = str(record["id"])
 
-    server = make_server("127.0.0.1", 0, root=tmp_path)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server, thread = _serve(tmp_path)
     try:
         status, _, data = _request(server, "GET", f"/datasets/demo/source/{source_id}")
         assert status == 200
@@ -71,6 +94,36 @@ def test_web_dataset_grid_and_exclusion(tmp_path: Path) -> None:
         thread.join(timeout=2)
 
 
+def test_web_imports_directory_as_separate_source(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    source.mkdir()
+    Image.new("RGB", (80, 80), "white").save(source / "frame.png")
+    DatasetWorkspace.create("demo", root=tmp_path)
+
+    server, thread = _serve(tmp_path)
+    try:
+        csrf = server.RequestHandlerClass.app.csrf
+        form = urlencode(
+            {
+                "_csrf": csrf,
+                "directory": str(source),
+                "label": "official",
+            }
+        )
+        status, headers, _ = _request(server, "POST", "/datasets/demo/import-dir", form)
+        assert status == 303
+        assert headers["Location"] == "/datasets/demo"
+        workspace = DatasetWorkspace.load("demo", root=tmp_path)
+        assert len(workspace.sources) == 1
+        source_id = next(iter(workspace.sources))
+        assert workspace.sources[source_id]["label"] == "official"
+        assert len(workspace.items(source_id=source_id)) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_web_rejects_bad_csrf(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -79,9 +132,7 @@ def test_web_rejects_bad_csrf(tmp_path: Path) -> None:
     record = workspace.add_source_from_directory(source, kind="image_directory")
     source_id = str(record["id"])
 
-    server = make_server("127.0.0.1", 0, root=tmp_path)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server, thread = _serve(tmp_path)
     try:
         form = urlencode(
             {
@@ -99,6 +150,14 @@ def test_web_rejects_bad_csrf(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_job_record_round_trip(tmp_path: Path) -> None:
+    created = create_job("video_prepare", {"dataset": "demo", "source": "/video.mkv"}, root=tmp_path)
+    loaded = read_job(str(created["id"]), root=tmp_path)
+    assert loaded["status"] == "queued"
+    assert loaded["payload"]["dataset"] == "demo"
+    assert Path(loaded["log"]).parent == tmp_path / "web" / "jobs"
 
 
 def test_training_command_uses_frozen_workflow(tmp_path: Path) -> None:
