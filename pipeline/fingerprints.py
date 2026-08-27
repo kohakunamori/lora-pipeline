@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 4
+FINGERPRINT_VERSION = 5
 TRAINING_PROFILE_KEYS = (
     "precision",
     "attention",
@@ -144,7 +144,7 @@ def compute_step_signature(
         profiles = _profiles(state)
         payload.update(
             {
-                "run": _latest_run_fingerprint(state),
+                "run": _run_fingerprint(state, options.get("run_id")),
                 "evaluation": profiles.merged.get("evaluation", {}),
                 "base": _base_fingerprint(state),
                 "trigger": project.get("trigger"),
@@ -238,8 +238,11 @@ def _base_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
     }
 
 
-def _latest_run_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
+def _run_fingerprint(state: "ProjectState", run_id: Any) -> Mapping[str, Any]:
+    requested = str(run_id) if run_id else None
     for record in reversed(state.payload.get("runs", [])):
+        if requested is not None and record.get("id") != requested:
+            continue
         if record.get("status") in {"trained", "evaluated", "promoted"}:
             checkpoints = []
             for value in record.get("checkpoints", []):
@@ -256,7 +259,7 @@ def _latest_run_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
                 "accounting": record.get("accounting", {}),
                 "checkpoints": checkpoints,
             }
-    return {"missing": True}
+    return {"missing": True, "requested_run_id": requested}
 
 
 def _hash_optional(path: Path) -> Mapping[str, Any] | None:
