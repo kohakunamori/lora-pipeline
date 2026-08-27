@@ -34,9 +34,20 @@ def run(
         raise PipelineError(f"Checkpoint selection is ambiguous: {checkpoint_name}")
     checkpoint = matches[0]
     evidence = dict(run_record.get("evaluation", {}))
-    if not evidence and not allow_unreviewed:
+    evaluated_names = {
+        value
+        for record in evidence.values()
+        if isinstance(record, dict)
+        for value in record.get("checkpoints", [])
+    }
+    checkpoint_was_evaluated = checkpoint.name in evaluated_names or checkpoint.stem in evaluated_names
+    if (not evidence or not checkpoint_was_evaluated) and not allow_unreviewed:
+        if not evidence:
+            detail = "Run has not been evaluated"
+        else:
+            detail = f"Checkpoint {checkpoint.name} has not been included in an evaluation stage"
         raise PipelineError(
-            "Run has not been evaluated. Review screening/full contact sheets first, "
+            f"{detail}. Review screening/full contact sheets first, "
             "or explicitly use --allow-unreviewed."
         )
 
@@ -69,6 +80,7 @@ def run(
             "checkpoint_sha256": sha256_file(checkpoint),
             "recommended_strength": strength,
             "allow_unreviewed": allow_unreviewed,
+            "checkpoint_was_evaluated": checkpoint_was_evaluated,
         },
         "training": {
             "physical_batch": accounting.get("physical_batch"),
