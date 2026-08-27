@@ -9,9 +9,6 @@ from .config import read_yaml, repository_root
 from .models import PipelineError
 
 
-DEFAULT_TEXT_ENCODER_LR = 1e-5
-
-
 @dataclass(frozen=True)
 class TrainingParameterSpec:
     key: str
@@ -24,6 +21,15 @@ class TrainingParameterSpec:
 
 
 TRAINING_PARAMETER_SPECS = (
+    TrainingParameterSpec(
+        "images_seen",
+        "图片曝光预算 images_seen",
+        "Image exposure budget (images_seen)",
+        "整个训练计划希望模型累计看到多少张训练图片，是本项目比较不同 Batch 策略时的主预算。",
+        "Canonical exposure budget: how many training images the model should see in total. It is the primary budget used to compare different batch strategies.",
+        "人物/衣装 LoRA 可先从 1000-3000 起步，再根据评测决定是否追加；数据很少时注意过拟合。",
+        "Character/outfit LoRAs often start around 1000-3000 exposures, then extend only if evaluation supports it; watch overfitting on small datasets.",
+    ),
     TrainingParameterSpec(
         "network_dim",
         "LoRA Rank",
@@ -55,9 +61,9 @@ TRAINING_PARAMETER_SPECS = (
         "batch_size",
         "物理 Batch Size",
         "Physical batch size",
-        "每个 micro-step 同时放进 GPU 的图片数，直接影响显存。这里不再设置人工上限；是否可用以实际显存/OOM 为准。",
-        "Number of images placed on the GPU per micro-step. It directly affects VRAM. The pipeline no longer imposes an artificial upper limit; actual VRAM/OOM determines feasibility.",
-        "V100 16GB 预设仍保守使用 1 或 2；可根据实际显存继续提高。固定 images_seen 时，Batch 增大也会减少 optimizer step 数。",
+        "每个 micro-step 同时放进 GPU 的图片数，直接影响显存。这里不设置人工上限；是否可用以实际显存/OOM 为准。",
+        "Number of images placed on the GPU per micro-step. It directly affects VRAM. The pipeline does not impose an artificial upper limit; actual VRAM/OOM determines feasibility.",
+        "V100 16GB 预设仍保守使用 1 或 2；可按实测显存继续提高。固定 images_seen 时，Batch 增大也会减少 optimizer step 数。",
         "V100 16GB presets remain conservative at 1 or 2, but you may raise it based on observed VRAM. With fixed images_seen, larger batches also reduce optimizer-step count.",
     ),
     TrainingParameterSpec(
@@ -70,31 +76,13 @@ TRAINING_PARAMETER_SPECS = (
         "Effective batch = physical batch x gradient accumulation. With fixed images_seen, increasing it also reduces optimizer-step count.",
     ),
     TrainingParameterSpec(
-        "train_text_encoder",
-        "训练 Text Encoder",
-        "Train text encoders",
-        "SDXL 有两个 Text Encoder。训练它们可让触发词/角色语义绑定更强，但更容易把数据集措辞学死，并增加显存与训练成本。",
-        "SDXL has two text encoders. Training them can strengthen trigger/identity binding, but can overfit wording and increases VRAM/compute cost.",
-        "默认关闭。只有在触发词绑定明显不足时再开启；开启后 Text Encoder 输出缓存会自动关闭。",
-        "Disabled by default. Enable only when trigger binding is clearly weak; text-encoder output caching is automatically disabled.",
-    ),
-    TrainingParameterSpec(
-        "text_encoder_lr1",
-        "Text Encoder 1 学习率",
-        "Text encoder 1 learning rate",
-        "SDXL 第一个 Text Encoder 的 LoRA 学习率。应明显低于 UNet LR，避免语义空间过快漂移。",
-        "LoRA learning rate for SDXL text encoder 1. Keep it substantially below the UNet LR to avoid rapid semantic drift.",
-        "建议从 1e-5 开始。",
-        "Start around 1e-5.",
-    ),
-    TrainingParameterSpec(
-        "text_encoder_lr2",
-        "Text Encoder 2 学习率",
-        "Text encoder 2 learning rate",
-        "SDXL 第二个 Text Encoder 的 LoRA 学习率。与 Encoder 1 一样通常应低于 UNet LR。",
-        "LoRA learning rate for SDXL text encoder 2. As with encoder 1, it should normally stay below the UNet LR.",
-        "建议从 1e-5 开始。",
-        "Start around 1e-5.",
+        "seed",
+        "随机种子 Seed",
+        "Random seed",
+        "控制训练中的随机顺序和随机过程，主要用于复现实验。更换 Seed 可能让最终结果略有差异，但不存在固定的“更好 Seed”。",
+        "Controls stochastic ordering and random processes for reproducibility. Different seeds can produce slightly different results, but there is no universally better seed.",
+        "默认 42。对比参数时尽量固定 Seed；做鲁棒性验证时再换 Seed 重跑。",
+        "Default is 42. Keep it fixed when comparing parameters; vary it only when testing robustness.",
     ),
 )
 
@@ -106,20 +94,15 @@ MANAGED_TRAINING_KEYS = frozenset(
         "unet_lr",
         "batch_size",
         "gradient_accumulation_steps",
-        "network_train_unet_only",
-        "cache_text_encoder_outputs",
-        "cache_text_encoder_outputs_to_disk",
-        "text_encoder_lr1",
-        "text_encoder_lr2",
+        "seed",
     }
 )
 
-_INT_KEYS = ("network_dim", "network_alpha", "batch_size", "gradient_accumulation_steps")
-_FLOAT_KEYS = ("unet_lr", "text_encoder_lr1", "text_encoder_lr2")
-_BOOL_KEYS = (
-    "network_train_unet_only",
-    "cache_text_encoder_outputs",
-    "cache_text_encoder_outputs_to_disk",
+_POSITIVE_INT_KEYS = (
+    "network_dim",
+    "network_alpha",
+    "batch_size",
+    "gradient_accumulation_steps",
 )
 
 
@@ -149,12 +132,9 @@ def update_key_training_overrides(
     *,
     strategy: str,
     values: Mapping[str, Any],
-    train_text_encoder: bool,
-    text_encoder_lr1: float | None = None,
-    text_encoder_lr2: float | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
-    """Replace the user-facing key parameter overrides while preserving unknown expert overrides."""
+    """Replace user-facing key overrides while preserving unknown expert overrides."""
 
     result = copy.deepcopy(dict(overrides or {}))
     training = dict(result.get("training", {}))
@@ -162,24 +142,12 @@ def update_key_training_overrides(
         training.pop(key, None)
 
     defaults = strategy_training_defaults(strategy, root=root)
-    for key in _INT_KEYS + ("unet_lr",):
+    for key in MANAGED_TRAINING_KEYS:
         if key not in values:
             continue
         value = values[key]
         if value != defaults.get(key):
             training[key] = value
-
-    if train_text_encoder:
-        training["network_train_unet_only"] = False
-        # sd-scripts cannot train text-encoder LoRA modules from cached text-encoder outputs.
-        training["cache_text_encoder_outputs"] = False
-        training["cache_text_encoder_outputs_to_disk"] = False
-        training["text_encoder_lr1"] = float(
-            DEFAULT_TEXT_ENCODER_LR if text_encoder_lr1 is None else text_encoder_lr1
-        )
-        training["text_encoder_lr2"] = float(
-            DEFAULT_TEXT_ENCODER_LR if text_encoder_lr2 is None else text_encoder_lr2
-        )
 
     if training:
         result["training"] = training
@@ -208,7 +176,7 @@ def validate_training_override_values(overrides: Mapping[str, Any] | None) -> No
     if not isinstance(training, Mapping):
         raise PipelineError("Training overrides must contain a training mapping")
 
-    for key in _INT_KEYS:
+    for key in _POSITIVE_INT_KEYS:
         if key not in training:
             continue
         value = training[key]
@@ -221,37 +189,24 @@ def validate_training_override_values(overrides: Mapping[str, Any] | None) -> No
         if parsed < 1 or parsed != value:
             raise PipelineError(f"Training parameter {key} must be an integer >= 1")
 
-    for key in _FLOAT_KEYS:
-        if key not in training:
-            continue
-        value = training[key]
+    if "seed" in training:
+        value = training["seed"]
         if isinstance(value, bool):
-            raise PipelineError(f"Training parameter {key} must be a positive number")
+            raise PipelineError("Training parameter seed must be an integer >= 0")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise PipelineError("Training parameter seed must be an integer >= 0") from exc
+        if parsed < 0 or parsed != value:
+            raise PipelineError("Training parameter seed must be an integer >= 0")
+
+    if "unet_lr" in training:
+        value = training["unet_lr"]
+        if isinstance(value, bool):
+            raise PipelineError("Training parameter unet_lr must be a positive number")
         try:
             parsed = float(value)
         except (TypeError, ValueError) as exc:
-            raise PipelineError(f"Training parameter {key} must be a positive number") from exc
+            raise PipelineError("Training parameter unet_lr must be a positive number") from exc
         if parsed <= 0:
-            raise PipelineError(f"Training parameter {key} must be a positive number")
-
-    for key in _BOOL_KEYS:
-        if key in training and not isinstance(training[key], bool):
-            raise PipelineError(f"Training parameter {key} must be true or false")
-
-    has_text_encoder_lr = any(key in training for key in ("text_encoder_lr1", "text_encoder_lr2"))
-    unet_only = training.get("network_train_unet_only", True)
-    if has_text_encoder_lr and unet_only is not False:
-        raise PipelineError(
-            "Text-encoder learning rates require network_train_unet_only=false"
-        )
-    if unet_only is False:
-        if "text_encoder_lr1" not in training or "text_encoder_lr2" not in training:
-            raise PipelineError(
-                "Training SDXL text encoders requires both text_encoder_lr1 and text_encoder_lr2"
-            )
-        if training.get("cache_text_encoder_outputs") is True or training.get(
-            "cache_text_encoder_outputs_to_disk"
-        ) is True:
-            raise PipelineError(
-                "Text-encoder training is incompatible with text-encoder output caching"
-            )
+            raise PipelineError("Training parameter unet_lr must be a positive number")
