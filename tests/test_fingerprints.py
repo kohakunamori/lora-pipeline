@@ -12,7 +12,7 @@ from pipeline.state import ProjectState
 from pipeline.steps import prepare
 
 
-def _repo(tmp_path: Path, monkeypatch) -> tuple[Path, ProjectState]:
+def _repo(tmp_path, monkeypatch) -> tuple[Path, ProjectState]:
     source = repository_root()
     root = tmp_path / "repo"
     shutil.copytree(source / "profiles", root / "profiles")
@@ -61,6 +61,25 @@ def _repo(tmp_path: Path, monkeypatch) -> tuple[Path, ProjectState]:
     return root, state
 
 
+def _add_run(state: ProjectState, run_id: str, checkpoint_bytes: bytes) -> Path:
+    checkpoint = (
+        state.project_dir / "runs" / run_id / "checkpoints" / "candidate.safetensors"
+    )
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(checkpoint_bytes)
+    state.payload["runs"].append(
+        {
+            "id": run_id,
+            "path": str(checkpoint.parents[1]),
+            "status": "trained",
+            "checkpoints": [str(checkpoint)],
+            "accounting": {"images_seen": 100},
+        }
+    )
+    state.save()
+    return checkpoint
+
+
 def test_raw_and_caption_changes_have_distinct_fingerprints(tmp_path, monkeypatch) -> None:
     _, state = _repo(tmp_path, monkeypatch)
     inspect_before = compute_step_signature(state, "inspect")
@@ -81,7 +100,9 @@ def test_raw_and_caption_changes_have_distinct_fingerprints(tmp_path, monkeypatc
     assert compute_step_signature(state, "inspect") != inspect_before
 
 
-def test_base_and_training_profile_changes_invalidate_only_relevant_inputs(tmp_path, monkeypatch) -> None:
+def test_base_and_training_profile_changes_invalidate_only_relevant_inputs(
+    tmp_path, monkeypatch
+) -> None:
     _, state = _repo(tmp_path, monkeypatch)
     preflight_before = compute_step_signature(state, "preflight")
     train_before = compute_step_signature(state, "train")
@@ -102,19 +123,7 @@ def test_base_and_training_profile_changes_invalidate_only_relevant_inputs(tmp_p
 
 def test_evaluation_config_changes_only_evaluation_fingerprint(tmp_path, monkeypatch) -> None:
     _, state = _repo(tmp_path, monkeypatch)
-    checkpoint = state.project_dir / "runs" / "run-1" / "checkpoints" / "candidate.safetensors"
-    checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_bytes(b"lora")
-    state.payload["runs"].append(
-        {
-            "id": "run-1",
-            "path": str(checkpoint.parents[1]),
-            "status": "trained",
-            "checkpoints": [str(checkpoint)],
-            "accounting": {"images_seen": 100},
-        }
-    )
-    state.save()
+    _add_run(state, "run-1", b"lora-one")
     train_before = compute_step_signature(state, "train")
     evaluate_before = compute_step_signature(
         state, "evaluate", options={"stage": "screening"}
@@ -129,3 +138,37 @@ def test_evaluation_config_changes_only_evaluation_fingerprint(tmp_path, monkeyp
         compute_step_signature(state, "evaluate", options={"stage": "screening"})
         != evaluate_before
     )
+
+
+def test_validation_changes_only_evaluation_fingerprint(tmp_path, monkeypatch) -> None:
+    _, state = _repo(tmp_path, monkeypatch)
+    _add_run(state, "run-1", b"lora-one")
+    train_before = compute_step_signature(state, "train")
+    evaluation_before = compute_step_signature(
+        state, "evaluate", options={"stage": "screening", "run_id": "run-1"}
+    )
+
+    validation = state.project_dir / "validation" / "holdout.png"
+    Image.new("RGB", (64, 64), "green").save(validation)
+    assert compute_step_signature(state, "train") == train_before
+    assert (
+        compute_step_signature(
+            state, "evaluate", options={"stage": "screening", "run_id": "run-1"}
+        )
+        != evaluation_before
+    )
+
+
+def test_selected_historical_run_is_part_of_evaluation_fingerprint(
+    tmp_path, monkeypatch
+) -> None:
+    _, state = _repo(tmp_path, monkeypatch)
+    _add_run(state, "run-1", b"lora-one")
+    _add_run(state, "run-2", b"lora-two")
+    first = compute_step_signature(
+        state, "evaluate", options={"stage": "screening", "run_id": "run-1"}
+    )
+    second = compute_step_signature(
+        state, "evaluate", options={"stage": "screening", "run_id": "run-2"}
+    )
+    assert first != second
