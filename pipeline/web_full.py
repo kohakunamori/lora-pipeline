@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import web_metadata_hooks as _web_metadata_hooks  # noqa: F401
 from .web_metadata import MetadataHandler as FullHandler
 from .web_metadata import main, make_server, serve
 
