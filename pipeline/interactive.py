@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 from .interactive_app import InteractiveWizard
+from .i18n import initialize_interactive
 
 
 def main() -> None:
@@ -11,6 +12,7 @@ def main() -> None:
 
         cli_main()
         return
+    initialize_interactive()
     InteractiveWizard().home()
 
 
