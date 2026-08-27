@@ -10,10 +10,11 @@ import warnings
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, TextIO
+from typing import Any, Mapping, TextIO
 
 from ..config import repository_root, sha256_file, stable_hash, write_json_atomic
 from ..models import ExternalCommandError, PipelineError, TrainingRequest, TrainingResult
+from ..prepared import load_current_generation
 from .base import TrainerBackend
 
 
@@ -64,29 +65,31 @@ def write_dataset_toml(path: Path, *, dataset_dir: Path, merged: Mapping[str, An
 
 
 def materialize_dataset_snapshot(project_dir: Path, target: Path) -> tuple[int, str, str]:
-    manifest_path = project_dir / "prepared" / "manifest.json"
-    if not manifest_path.exists():
-        raise PipelineError("Prepared dataset manifest is missing; run prepare first")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    generation = load_current_generation(project_dir)
+    manifest = generation.manifest
     target.mkdir(parents=True, exist_ok=False)
     snapshot_records: list[dict[str, Any]] = []
     for record in manifest.get("images", []):
-        image = project_dir / "prepared" / record["image"]
-        caption = project_dir / "prepared" / record["caption"]
+        image = generation.root / record["image"]
+        caption = generation.root / record["caption"]
         relative = Path(record["source"])
+        if not image.is_file() or not caption.is_file():
+            raise PipelineError(f"Prepared generation is incomplete for {relative.as_posix()}")
         # sd-scripts pairs captions by stem. Include the source extension in the
         # snapshot stem so foo.jpg and foo.png cannot fight over foo.txt.
         unique_name = f"{relative.stem}__{relative.suffix.lower().lstrip('.')}" + relative.suffix.lower()
         image_target = target / relative.parent / unique_name
         caption_target = image_target.with_suffix(".txt")
         image_target.parent.mkdir(parents=True, exist_ok=True)
-        _link_or_copy(image, image_target)
-        _link_or_copy(caption, caption_target)
+        _link_or_copy_immutable(image, image_target)
+        _link_or_copy_immutable(caption, caption_target)
         snapshot_records.append(
             {
                 "path": relative.as_posix(),
+                "generation_id": generation.generation_id,
                 "image_bytes": image.stat().st_size,
-                "image_sha256": sha256_file(image),
+                "image_sha256": record.get("source_image_sha256") or sha256_file(image),
+                "caption_sha256": record.get("caption_sha256") or sha256_file(caption),
                 "caption": caption.read_text(encoding="utf-8", errors="replace").strip(),
             }
         )
@@ -95,17 +98,27 @@ def materialize_dataset_snapshot(project_dir: Path, target: Path) -> tuple[int, 
     captions_hash = stable_hash(
         [{"path": record["path"], "caption": record["caption"]} for record in snapshot_records]
     )
-    return len(snapshot_records), stable_hash(snapshot_records), captions_hash
+    dataset_hash = stable_hash(snapshot_records)
+    write_json_atomic(
+        target / "snapshot-manifest.json",
+        {
+            "schema_version": 2,
+            "prepared_generation": generation.generation_id,
+            "dataset_snapshot_hash": dataset_hash,
+            "captions_hash": captions_hash,
+            "images": snapshot_records,
+        },
+    )
+    return len(snapshot_records), dataset_hash, captions_hash
 
 
-def _link_or_copy(source: Path, destination: Path) -> None:
+def _link_or_copy_immutable(source: Path, destination: Path) -> None:
+    """Hard-link only from an immutable generation; never create mutable symlinks."""
+
     try:
         os.link(source, destination)
     except OSError:
-        try:
-            destination.symlink_to(source)
-        except OSError:
-            shutil.copy2(source, destination)
+        shutil.copy2(source, destination)
 
 
 def run_command_tee(
@@ -131,13 +144,22 @@ def run_command_tee(
             errors="replace",
             bufsize=1,
         )
-        assert process.stdout is not None
-        for line in process.stdout:
-            log.write(line)
-            log.flush()
-            if verbose:
-                print(line, end="")
-        return process.wait()
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                if verbose:
+                    print(line, end="")
+            return process.wait()
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
 
 
 def _lease_command(value: Any, *, name: str) -> list[str] | None:
@@ -220,17 +242,22 @@ class GpuMonitor(AbstractContextManager["GpuMonitor"]):
     def __enter__(self) -> "GpuMonitor":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("w", encoding="utf-8")
-        self.process = subprocess.Popen(
-            [
-                "nvidia-smi",
-                "--query-gpu=timestamp,memory.used,utilization.gpu,power.draw",
-                "--format=csv,noheader,nounits",
-                "--loop-ms=500",
-            ],
-            stdout=self.handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        try:
+            self.process = subprocess.Popen(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=timestamp,memory.used,utilization.gpu,power.draw",
+                    "--format=csv,noheader,nounits",
+                    "--loop-ms=500",
+                ],
+                stdout=self.handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except OSError as exc:
+            self.handle.write(f"monitor unavailable: {exc}\n")
+            self.handle.flush()
+            self.process = None
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -243,20 +270,30 @@ class GpuMonitor(AbstractContextManager["GpuMonitor"]):
         if self.handle is not None:
             self.handle.close()
 
-    def peak_memory_mib(self) -> int | None:
+    def summary(self) -> dict[str, float | int | None]:
+        memory: list[float] = []
+        utilization: list[float] = []
+        power: list[float] = []
         if not self.path.exists():
-            return None
-        peak: int | None = None
+            return {"samples": 0, "peak_vram_mib": None, "mean_gpu_utilization": None, "mean_power_w": None}
         for line in self.path.read_text(encoding="utf-8", errors="replace").splitlines():
-            parts = line.split(",")
-            if len(parts) < 2:
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 4:
                 continue
             try:
-                value = int(float(parts[1].strip()))
+                memory.append(float(parts[1]))
+                utilization.append(float(parts[2]))
+                power.append(float(parts[3]))
             except ValueError:
                 continue
-            peak = value if peak is None else max(peak, value)
-        return peak
+        return {
+            "samples": len(memory),
+            "peak_vram_mib": int(max(memory)) if memory else None,
+            "mean_gpu_utilization": round(sum(utilization) / len(utilization), 3)
+            if utilization
+            else None,
+            "mean_power_w": round(sum(power) / len(power), 3) if power else None,
+        }
 
 
 class SdScriptsTrainer(TrainerBackend):
@@ -264,8 +301,12 @@ class SdScriptsTrainer(TrainerBackend):
         self.root = root or repository_root()
         self.use_gpu_lease = use_gpu_lease
 
-    def train(self, request: TrainingRequest, *, dry_run: bool = False, verbose: int = 0) -> TrainingResult:
-        info = json.loads((self.root / "environment" / "environment-info.json").read_text(encoding="utf-8"))
+    def train(
+        self, request: TrainingRequest, *, dry_run: bool = False, verbose: int = 0
+    ) -> TrainingResult:
+        info = json.loads(
+            (self.root / "environment" / "environment-info.json").read_text(encoding="utf-8")
+        )
         python = Path(info["python_path"])
         accelerate = python.parent / "accelerate"
         sd_scripts = Path(info["sd_scripts_path"])
@@ -274,21 +315,55 @@ class SdScriptsTrainer(TrainerBackend):
             if not required.exists():
                 raise PipelineError(f"Validated training component is missing: {required}")
 
-        config_dir = request.run_dir / "config"
-        checkpoints_dir = request.run_dir / "checkpoints"
-        logs_dir = request.run_dir / "logs"
-        for path in (config_dir, checkpoints_dir, logs_dir, request.run_dir / "samples", request.run_dir / "metrics"):
-            path.mkdir(parents=True, exist_ok=True)
-        dataset_dir = config_dir / "dataset"
-        image_count, dataset_hash, captions_hash = materialize_dataset_snapshot(request.project_dir, dataset_dir)
         merged = request.config.merged
         training = merged.get("training", {})
         precision = merged.get("precision", {})
         attention = merged.get("attention", {})
         memory = merged.get("memory", {})
-        caption = merged.get("caption", {})
-        target_candidates = max(1, int(merged.get("checkpoints", {}).get("target_candidates", 5)))
+        data_loader = merged.get("data_loader", {})
+        storage = merged.get("storage", {})
+
+        persistent_config = request.run_dir / "config"
+        persistent_checkpoints = request.run_dir / "checkpoints"
+        persistent_logs = request.run_dir / "logs"
+        for path in (
+            persistent_config,
+            persistent_checkpoints,
+            persistent_logs,
+            request.run_dir / "samples",
+            request.run_dir / "metrics",
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
+        scratch_value = storage.get("scratch_root")
+        if scratch_value:
+            work_root = (
+                Path(str(scratch_value)).expanduser()
+                / "lora-pipeline"
+                / request.project_dir.name
+                / request.run_dir.name
+            )
+            work_root.mkdir(parents=True, exist_ok=True)
+        else:
+            work_root = request.run_dir
+        work_dataset = work_root / "dataset"
+        work_checkpoints = work_root / "checkpoints"
+        work_logs = work_root / "logs"
+        if work_dataset.exists():
+            shutil.rmtree(work_dataset)
+        work_checkpoints.mkdir(parents=True, exist_ok=True)
+        work_logs.mkdir(parents=True, exist_ok=True)
+
+        image_count, dataset_hash, captions_hash = materialize_dataset_snapshot(
+            request.project_dir, work_dataset
+        )
+        shutil.copy2(work_dataset / "snapshot-manifest.json", persistent_config / "dataset-snapshot.json")
+
+        target_candidates = max(
+            1, int(merged.get("checkpoints", {}).get("target_candidates", 5))
+        )
         save_interval = max(1, math.ceil(request.optimizer_steps / target_candidates))
+        save_state = bool(training.get("save_state", True))
         train_values: dict[str, Any] = {
             "pretrained_model_name_or_path": str(request.base.path),
             "network_module": training.get("network_module", "networks.lora"),
@@ -307,21 +382,43 @@ class SdScriptsTrainer(TrainerBackend):
             "gradient_checkpointing": bool(memory.get("gradient_checkpointing", True)),
             "cache_latents": bool(training.get("cache_latents", True)),
             "cache_latents_to_disk": bool(training.get("cache_latents_to_disk", True)),
-            "cache_text_encoder_outputs": bool(training.get("cache_text_encoder_outputs", False)),
-            "cache_text_encoder_outputs_to_disk": bool(training.get("cache_text_encoder_outputs_to_disk", False)),
-            "max_data_loader_n_workers": 0,
-            "persistent_data_loader_workers": False,
+            "cache_text_encoder_outputs": bool(
+                training.get("cache_text_encoder_outputs", False)
+            ),
+            "cache_text_encoder_outputs_to_disk": bool(
+                training.get("cache_text_encoder_outputs_to_disk", False)
+            ),
+            "max_data_loader_n_workers": int(data_loader.get("workers", 0)),
+            "persistent_data_loader_workers": bool(
+                data_loader.get("persistent_workers", False)
+            ),
             "max_train_steps": request.optimizer_steps,
-            "gradient_accumulation_steps": int(training.get("gradient_accumulation_steps", 1)),
-            "max_token_length": int(merged.get("caption", {}).get("max_token_length", request.config.hardware.get("caption", {}).get("default_max_token_length", 75))),
+            "gradient_accumulation_steps": int(
+                training.get("gradient_accumulation_steps", 1)
+            ),
+            "max_token_length": int(
+                merged.get("caption", {}).get(
+                    "max_token_length",
+                    request.config.hardware.get("caption", {}).get(
+                        "default_max_token_length", 75
+                    ),
+                )
+            ),
             "seed": int(training.get("seed", 42)),
             "save_model_as": "safetensors",
             "save_every_n_steps": save_interval,
-            "save_state": False,
+            "save_state": save_state,
+            "resume": str(request.resume_state) if request.resume_state else None,
         }
-        write_flat_toml(config_dir / "train.toml", train_values)
-        write_dataset_toml(config_dir / "dataset.toml", dataset_dir=dataset_dir, merged=merged)
-        output_name = _safe_output_name(request.project_dir.name, request.base.id, int(training.get("network_dim", 16)))
+        write_flat_toml(persistent_config / "train.toml", train_values)
+        write_dataset_toml(
+            persistent_config / "dataset.toml", dataset_dir=work_dataset, merged=merged
+        )
+        output_name = _safe_output_name(
+            request.project_dir.name,
+            request.base.id,
+            int(training.get("network_dim", 16)),
+        )
         command = [
             str(accelerate),
             "launch",
@@ -330,24 +427,25 @@ class SdScriptsTrainer(TrainerBackend):
             "--num_machines",
             "1",
             "--num_cpu_threads_per_process",
-            "1",
+            str(max(1, int(data_loader.get("cpu_threads_per_process", 1)))),
             "--mixed_precision",
             str(precision.get("mixed_precision", "fp16")),
             str(entrypoint),
             "--config_file",
-            str(config_dir / "train.toml"),
+            str(persistent_config / "train.toml"),
             "--dataset_config",
-            str(config_dir / "dataset.toml"),
+            str(persistent_config / "dataset.toml"),
             "--output_dir",
-            str(checkpoints_dir),
+            str(work_checkpoints),
             "--output_name",
             output_name,
             "--logging_dir",
-            str(logs_dir / "tensorboard"),
+            str(work_logs / "tensorboard"),
         ]
         physical_batch = int(training.get("batch_size", 1))
         accumulation = int(training.get("gradient_accumulation_steps", 1))
         effective_batch = physical_batch * accumulation
+        actual_images_seen = request.optimizer_steps * effective_batch
         accounting = {
             "dataset_images": image_count,
             "dataset_snapshot_hash": dataset_hash,
@@ -356,12 +454,14 @@ class SdScriptsTrainer(TrainerBackend):
             "gradient_accumulation": accumulation,
             "effective_batch": effective_batch,
             "optimizer_steps": request.optimizer_steps,
-            "images_seen": request.optimizer_steps * effective_batch,
-            "epochs": round(request.optimizer_steps * effective_batch / image_count, 6),
+            "target_images_seen": request.target_images_seen,
+            "images_seen": actual_images_seen,
+            "exposure_rounding_overhead": actual_images_seen - request.target_images_seen,
+            "epochs": round(actual_images_seen / image_count, 6),
             "save_every_n_steps": save_interval,
         }
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": request.run_dir.name,
             "created_at": datetime.now(UTC).isoformat(),
             "base": {
@@ -382,9 +482,21 @@ class SdScriptsTrainer(TrainerBackend):
             "config_hash": stable_hash({"train": train_values, "merged": merged}),
             "pipeline_git_commit": _git_commit(self.root),
             "cli_command": list(request.command_line),
+            "storage": {
+                "persistent_run_dir": str(request.run_dir),
+                "work_root": str(work_root),
+                "scratch_enabled": work_root != request.run_dir,
+                "dataset_dir": str(work_dataset),
+                "checkpoint_dir": str(work_checkpoints),
+                "log_dir": str(work_logs),
+            },
+            "resume_state": str(request.resume_state) if request.resume_state else None,
         }
-        write_json_atomic(config_dir / "run-metadata.json", metadata)
-        shutil.copy2(self.root / "environment" / "environment-info.json", config_dir / "environment-info.json")
+        write_json_atomic(persistent_config / "run-metadata.json", metadata)
+        shutil.copy2(
+            self.root / "environment" / "environment-info.json",
+            persistent_config / "environment-info.json",
+        )
         if dry_run:
             return TrainingResult(
                 run_id=request.run_dir.name,
@@ -399,38 +511,67 @@ class SdScriptsTrainer(TrainerBackend):
         environment.update(
             {
                 "HF_HOME": str(self.root / ".cache" / "huggingface"),
-                "HUGGINGFACE_HUB_CACHE": str(self.root / ".cache" / "huggingface" / "hub"),
-                "TRANSFORMERS_CACHE": str(self.root / ".cache" / "huggingface" / "transformers"),
+                "HUGGINGFACE_HUB_CACHE": str(
+                    self.root / ".cache" / "huggingface" / "hub"
+                ),
+                "TRANSFORMERS_CACHE": str(
+                    self.root / ".cache" / "huggingface" / "transformers"
+                ),
                 "PYTHONUNBUFFERED": "1",
             }
         )
         lease = gpu_lease_from_info(info, enabled=self.use_gpu_lease)
-        monitor = GpuMonitor(logs_dir / "gpu-monitor.csv")
+        monitor = GpuMonitor(work_logs / "gpu-monitor.csv")
         started = time.monotonic()
-        with lease, monitor:
-            exit_code = run_command_tee(
-                command,
-                cwd=sd_scripts,
-                env=environment,
-                log_path=logs_dir / "train.log",
-                verbose=verbose,
-            )
+        try:
+            with lease, monitor:
+                exit_code = run_command_tee(
+                    command,
+                    cwd=sd_scripts,
+                    env=environment,
+                    log_path=work_logs / "train.log",
+                    verbose=verbose,
+                )
+        finally:
+            if work_root != request.run_dir:
+                _sync_tree(work_logs, persistent_logs)
+                _sync_tree(work_checkpoints, persistent_checkpoints)
         elapsed = round(time.monotonic() - started, 3)
-        checkpoints = sorted(checkpoints_dir.glob("*.safetensors"), key=lambda path: (path.stat().st_mtime_ns, path.name))
+        checkpoint_source = persistent_checkpoints
+        checkpoints = sorted(
+            checkpoint_source.glob("*.safetensors"),
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+        )
+        gpu_metrics = monitor.summary()
         metrics = {
             "exit_code": exit_code,
             "elapsed_seconds": elapsed,
-            "peak_vram_mib": monitor.peak_memory_mib(),
+            **gpu_metrics,
             "checkpoint_count": len(checkpoints),
             "config_hash": metadata["config_hash"],
+            "mean_seconds_per_optimizer_step": round(elapsed / request.optimizer_steps, 6),
+            "images_per_second": round(actual_images_seen / elapsed, 6) if elapsed else None,
+            "storage": metadata["storage"],
+            "resume_states": [
+                str(path)
+                for path in sorted(
+                    persistent_checkpoints.glob("*-state"),
+                    key=lambda item: item.stat().st_mtime_ns,
+                )
+                if path.is_dir()
+            ],
         }
+        _retain_latest_state(
+            persistent_checkpoints,
+            enabled=str(training.get("state_retention", "latest")) == "latest",
+        )
         metadata["result"] = {**metrics, "checkpoints": [str(path) for path in checkpoints]}
-        write_json_atomic(config_dir / "run-metadata.json", metadata)
+        write_json_atomic(persistent_config / "run-metadata.json", metadata)
         if exit_code or not checkpoints:
             raise ExternalCommandError(
                 f"sd-scripts training failed (exit={exit_code}, checkpoints={len(checkpoints)})",
                 exit_code=exit_code or 1,
-                log_path=logs_dir / "train.log",
+                log_path=persistent_logs / "train.log",
             )
         return TrainingResult(
             run_id=request.run_dir.name,
@@ -441,14 +582,53 @@ class SdScriptsTrainer(TrainerBackend):
         )
 
 
+def _sync_tree(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        target = destination / item.name
+        temporary = destination / f".{item.name}.syncing"
+        if temporary.exists():
+            if temporary.is_dir():
+                shutil.rmtree(temporary)
+            else:
+                temporary.unlink()
+        if item.is_dir():
+            shutil.copytree(item, temporary)
+            if target.exists():
+                shutil.rmtree(target)
+            os.replace(temporary, target)
+        else:
+            shutil.copy2(item, temporary)
+            os.replace(temporary, target)
+
+
+def _retain_latest_state(checkpoints_dir: Path, *, enabled: bool) -> None:
+    if not enabled:
+        return
+    states = sorted(
+        (path for path in checkpoints_dir.glob("*-state") if path.is_dir()),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+    for stale in states[:-1]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def _safe_output_name(project: str, base_id: str, rank: int) -> str:
-    project_short = "".join(character for character in project.lower() if character.isalnum() or character in "-_")[:32]
+    project_short = "".join(
+        character for character in project.lower() if character.isalnum() or character in "-_"
+    )[:32]
     base_short = "".join(part[:8] for part in base_id.split("_")[:2])[:16]
     return f"{project_short}__{base_short}__r{rank}"
 
 
 def _git_commit(root: Path) -> str:
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, check=False, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else "uncommitted"
