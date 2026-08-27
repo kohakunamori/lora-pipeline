@@ -12,5 +12,5 @@ def test_custom_proxy_rejects_missing_host() -> None:
 
 
 def test_custom_proxy_rejects_non_numeric_port_as_user_error() -> None:
-    with pytest.raises((PipelineError, ValueError)):
+    with pytest.raises(PipelineError, match="Proxy port"):
         VideoProxy(mode="custom", url="http://127.0.0.1:not-a-port")
