@@ -13,7 +13,19 @@ if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 3
+FINGERPRINT_VERSION = 4
+TRAINING_PROFILE_KEYS = (
+    "precision",
+    "attention",
+    "memory",
+    "resolution",
+    "caption",
+    "training",
+    "checkpoints",
+    "data_loader",
+    "storage",
+    "limits",
+)
 
 STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "inspect": (),
@@ -114,11 +126,17 @@ def compute_step_signature(
             }
         )
     elif name in {"preflight", "train"}:
+        profiles = _profiles(state)
         payload.update(
             {
                 "prepared": _prepared_fingerprint(state),
                 "base": _base_fingerprint(state),
-                "profiles": _profiles(state).merged,
+                "profiles": _training_profile_slice(profiles.merged),
+                "profile_ids": {
+                    "hardware": profiles.hardware.get("id"),
+                    "concept": profiles.concept.get("id"),
+                    "training": profiles.training.get("id"),
+                },
                 "budget": project.get("budget", {}),
             }
         )
@@ -134,6 +152,10 @@ def compute_step_signature(
             }
         )
     return stable_hash(payload)
+
+
+def _training_profile_slice(merged: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: merged[key] for key in TRAINING_PROFILE_KEYS if key in merged}
 
 
 def _profiles(state: "ProjectState"):
