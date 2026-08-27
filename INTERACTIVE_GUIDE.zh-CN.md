@@ -64,10 +64,11 @@ lora-pipeline
 1. **Continue recommended work**：按照保存的工作流偏好继续执行；
 2. **Run one step**：单独运行、重试或强制重跑某个步骤；
 3. **Workflow preferences**：保存 caption、去重、审核和评测偏好；
-4. **Evaluate checkpoints**：通过编号选择 Screening 或 Full Evaluation；
-5. **Promote a checkpoint**：人工确认后生成 `best.safetensors`；
-6. **Status and artifacts**：查看数据、报告、contact sheet、run 和输出路径；
-7. **Advanced recovery**：只用于预览、锁恢复或显式跳过 preflight。
+4. **Import validation images**：从目录导入独立验证集并自动检查训练集泄漏；
+5. **Evaluate checkpoints**：通过编号选择 Screening 或 Full Evaluation；
+6. **Promote a checkpoint**：人工确认后生成 `best.safetensors`；
+7. **Status and artifacts**：查看数据、报告、contact sheet、run 和输出路径；
+8. **Advanced recovery**：只用于预览、锁恢复或显式跳过 preflight。
 
 ## 可保存的工作流偏好
 
@@ -82,6 +83,21 @@ lora-pipeline
 - 训练后是否自动运行 Screening Evaluation。
 
 以后在项目仪表盘选择 **Continue recommended work** 即可复用这些设置。
+
+## 导入独立验证集
+
+在项目仪表盘选择 **Import validation images**，再输入保存 holdout 图片的目录。
+
+向导会：
+
+- 统计可用图片；
+- 对训练集和待导入图片计算内容哈希；
+- 检测到与训练集完全相同的图片时阻止整次导入；
+- 跳过验证集中已经存在的相同内容；
+- 在文件名冲突但内容不同时生成安全的新文件名；
+- 只让 Evaluation 失效，不会要求重新训练。
+
+因此不需要使用 `cp`、文件管理脚本或手工进入 `projects/<name>/validation/`。
 
 ## Caption 模式
 
@@ -144,4 +160,4 @@ best.yaml
 
 ## 高级命令仍然可用
 
-原有的非交互式子命令继续保留，适合自动化或调试。但正常的创建、训练、恢复、评测、晋升和底模管理均可在编号菜单中完成。
+原有的非交互式子命令继续保留，适合自动化或调试。但正常的创建、训练、恢复、评测、晋升、验证集导入和底模管理均可在编号菜单中完成。
