@@ -84,10 +84,12 @@ def run(
         profiles.merged.get("checkpoints", {}).get("target_candidates", 5)
     )
     checkpoints = checkpoints[-target_candidates:]
-    if stage == "full" and not checkpoint_names and len(checkpoints) > 2:
+    if stage == "full" and len(checkpoints) > 2:
+        if checkpoint_names:
+            raise PipelineError("Full evaluation accepts only one or two finalists")
         raise PipelineError(
             "Full evaluation requires explicit finalists when more than two checkpoints exist; "
-            "repeat --checkpoint for one or two candidates"
+            "choose one or two candidates in the interactive checkpoint picker"
         )
     seed = int(profiles.merged.get("training", {}).get("seed", 42))
     subject_prompt = str(
@@ -270,10 +272,7 @@ def run(
             "contact_sheets": metrics["contact_sheets"],
             "report": str(report),
             "manual_selection_required": True,
-            "next": (
-                f"./lora promote {state.name} --run {run_dir.name} "
-                "--checkpoint <candidate> --strength <value>"
-            ),
+            "next": "Open the project dashboard and choose Promote a checkpoint after review",
         },
     )
 
@@ -468,7 +467,7 @@ def _write_report(
         "</head><body>"
         f"<h1>{html.escape(state.name)} — {html.escape(stage)} evaluation</h1>"
         "<p class='warning'><strong>Manual selection required.</strong> Automatic metrics are auxiliary. "
-        "Use the promote command only after reviewing aligned sheets.</p>"
+        "Use the project dashboard's Promote a checkpoint action only after reviewing aligned sheets.</p>"
         f"{sheet_html}"
         "<h2>Run summary</h2>"
         f"<pre>{html.escape(json.dumps(payload, indent=2, ensure_ascii=False))}</pre>"

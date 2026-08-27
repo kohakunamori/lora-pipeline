@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-lora-pipeline = "pipeline.cli:main"
+lora-pipeline = "pipeline.interactive:main"
 
 [tool.setuptools.packages.find]
 include = ["pipeline*"]

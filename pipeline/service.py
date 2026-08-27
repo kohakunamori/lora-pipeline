@@ -214,6 +214,8 @@ def run_remaining(
     exclude_exact: bool = False,
     allow_trigger_only: bool | None = None,
     images_seen: int | None = None,
+    resume_run: str | None = None,
+    on_step: Callable[[str], None] | None = None,
     trainer_backend: TrainerBackend | None = None,
     generation_backend: GenerationBackend | None = None,
 ) -> list[tuple[str, StepResult]]:
@@ -227,7 +229,28 @@ def run_remaining(
         state = ProjectState.load(state.project_dir)
         if state.step(name).get("permanent") and state.status(name) is StepStatus.SKIPPED:
             continue
-        if name in skip:
+        if on_step is not None:
+            on_step(name)
+        if dry_run and name in skip:
+            result = StepResult(
+                status=StepStatus.SKIPPED,
+                details={
+                    "dry_run": True,
+                    "would_skip": name,
+                    "reason": "explicitly skipped by run command",
+                },
+            )
+        elif dry_run and name == "preflight" and skip_preflight:
+            result = StepResult(
+                status=StepStatus.SKIPPED,
+                details={
+                    "dry_run": True,
+                    "would_skip": "preflight",
+                    "reason": "expert --skip-preflight override",
+                    "warning": True,
+                },
+            )
+        elif name in skip:
             result = skip_optional_step(
                 state,
                 name,
@@ -254,6 +277,7 @@ def run_remaining(
                 exclude_exact=exclude_exact,
                 allow_trigger_only=allow_trigger_only,
                 images_seen=images_seen,
+                resume_run=resume_run if name == "train" else None,
                 trainer_backend=trainer_backend,
                 generation_backend=generation_backend,
             )

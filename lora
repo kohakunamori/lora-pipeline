@@ -7,4 +7,7 @@ if [[ ! -x "$python" ]]; then
   python="${PYTHON:-python3}"
 fi
 export LORA_PIPELINE_ROOT="${LORA_PIPELINE_ROOT:-$root}"
+if [[ "$#" -eq 0 ]]; then
+  exec "$python" -m pipeline.interactive
+fi
 exec "$python" -m pipeline.cli "$@"
