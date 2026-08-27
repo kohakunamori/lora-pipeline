@@ -14,6 +14,7 @@ from .models import PipelineError
 
 
 GPU_JOB_KINDS = {"train", "evaluate", "video_prepare", "video_finalize", "dataset_tag"}
+_ACTIVE_STATES = {"queued", "starting", "running"}
 _FINAL_STATES = {"completed", "failed", "cancelled", "awaiting_identity"}
 
 
@@ -95,7 +96,13 @@ def spawn_job(kind: str, payload: Mapping[str, Any], *, root: Path | None = None
     return _spawn_existing(record["id"], root=root)
 
 
-def resume_job(job_id: str, *, kind: str, payload_updates: Mapping[str, Any], root: Path | None = None) -> dict[str, Any]:
+def resume_job(
+    job_id: str,
+    *,
+    kind: str,
+    payload_updates: Mapping[str, Any],
+    root: Path | None = None,
+) -> dict[str, Any]:
     root = (root or repository_root()).resolve()
     if kind in GPU_JOB_KINDS:
         active = [job for job in active_gpu_jobs(root=root) if job["id"] != job_id]
@@ -122,22 +129,40 @@ def resume_job(job_id: str, *, kind: str, payload_updates: Mapping[str, Any], ro
 
 
 def _spawn_existing(job_id: str, *, root: Path) -> dict[str, Any]:
-    record = read_job(job_id, root=root)
+    record = update_job(
+        job_id,
+        root=root,
+        status="starting",
+        pid=None,
+        error=None,
+        started_at=utc_now(),
+    )
     log_path = Path(str(record["log"]))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["LORA_PIPELINE_ROOT"] = str(root)
-    with log_path.open("ab", buffering=0) as log:
-        process = subprocess.Popen(
-            [sys.executable, "-m", "pipeline.web_worker", job_id],
-            cwd=root,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
+    try:
+        with log_path.open("ab", buffering=0) as log:
+            subprocess.Popen(
+                [sys.executable, "-m", "pipeline.web_worker", job_id],
+                cwd=root,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except BaseException as exc:
+        return update_job(
+            job_id,
+            root=root,
+            status="failed",
+            error=f"Could not start worker: {type(exc).__name__}: {exc}",
+            finished_at=utc_now(),
         )
-    return update_job(job_id, root=root, status="running", pid=process.pid, started_at=utc_now())
+    # The child records its own PID and running state. Avoid a parent-side write
+    # after Popen: a very fast worker may already have recorded a final result.
+    return read_job(job_id, root=root)
 
 
 def list_jobs(*, root: Path | None = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -159,7 +184,7 @@ def active_gpu_jobs(*, root: Path | None = None) -> list[dict[str, Any]]:
     return [
         job
         for job in list_jobs(root=root, limit=200)
-        if job.get("kind") in GPU_JOB_KINDS and job.get("status") == "running"
+        if job.get("kind") in GPU_JOB_KINDS and job.get("status") in _ACTIVE_STATES
     ]
 
 
@@ -185,13 +210,17 @@ def tail_job_log(job_id: str, *, root: Path | None = None, max_bytes: int = 48_0
 
 
 def _refresh_liveness(record: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
-    if record.get("status") != "running":
+    status = str(record.get("status") or "")
+    if status not in _ACTIVE_STATES:
         return record
+    # queued/starting records may not have a PID yet; the detached child is the
+    # authority that records its own PID. Do not convert that short startup window
+    # into a false failure merely because a status page refreshed quickly.
     pid = record.get("pid")
-    if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
         return record
-    # A worker normally records its final state itself. If it vanished before doing
-    # so, make that failure visible instead of showing an eternal running job.
+    if _pid_alive(pid):
+        return record
     record = dict(record)
     record.update(
         {
