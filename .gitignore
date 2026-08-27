@@ -18,3 +18,5 @@ smoke/dataset-batch2/
 smoke/runs/
 projects/*
 !projects/.gitkeep
+datasets/*
+!datasets/.gitkeep
