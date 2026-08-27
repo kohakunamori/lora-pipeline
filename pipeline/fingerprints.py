@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 5
+FINGERPRINT_VERSION = 6
 TRAINING_PROFILE_KEYS = (
     "precision",
     "attention",
@@ -149,6 +149,7 @@ def compute_step_signature(
                 "base": _base_fingerprint(state),
                 "trigger": project.get("trigger"),
                 "subject_prompt": project.get("evaluation", {}).get("subject_prompt"),
+                "validation_images": _validation_images(state),
             }
         )
     return stable_hash(payload)
@@ -168,16 +169,23 @@ def _profiles(state: "ProjectState"):
     )
 
 
-def _raw_images(state: "ProjectState") -> list[dict[str, Any]]:
-    raw = state.project_dir / "raw"
+def _image_fingerprints(root: Path) -> list[dict[str, Any]]:
     return [
         {
-            "path": image.relative_to(raw).as_posix(),
+            "path": image.relative_to(root).as_posix(),
             "bytes": image.stat().st_size,
             "sha256": sha256_file(image),
         }
-        for image in discover_images(raw)
+        for image in discover_images(root)
     ]
+
+
+def _raw_images(state: "ProjectState") -> list[dict[str, Any]]:
+    return _image_fingerprints(state.project_dir / "raw")
+
+
+def _validation_images(state: "ProjectState") -> list[dict[str, Any]]:
+    return _image_fingerprints(state.project_dir / "validation")
 
 
 def _raw_captions(state: "ProjectState") -> list[dict[str, Any]]:
