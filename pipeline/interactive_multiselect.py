@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
 from rich.console import Console, Group
-from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .i18n import get_language
 from .models import PipelineError
 
 
@@ -95,7 +95,15 @@ def select_many(
     page_size: int = 30,
     key_reader: Callable[[], str] | None = None,
 ) -> list[str] | None:
-    """Keyboard-first selector. Enter commits; Q/Esc cancels without a result."""
+    """Keyboard-first selector. Enter commits; Q/Esc cancels without a result.
+
+    The selector deliberately avoids Rich ``Live``. Some SSH/WebTTY frontends do
+    not implement the cursor-up sequences Live uses to replace previous frames,
+    causing every key press to append another copy of the selector diagonally
+    across the terminal. Checkbox state must still update after Space/A/N, so each
+    logical change uses the much simpler terminal contract: clear screen, home the
+    cursor, and print one complete static frame.
+    """
     if not options:
         return []
     selected_values = set(selected)
@@ -110,21 +118,43 @@ def select_many(
             raise PipelineError("Keyboard multi-select requires an interactive TTY")
         key_reader = read_key
 
-    with Live(
-        _render(title, options, state, page_size=page_size),
-        console=console,
-        refresh_per_second=12,
-        transient=True,
-    ) as live:
-        while True:
-            key = key_reader()
-            if state.apply(key):
-                break
-            live.update(_render(title, options, state, page_size=page_size), refresh=True)
+    _draw_selector(console, title, options, state, page_size=page_size)
+    while True:
+        key = key_reader()
+        if state.apply(key):
+            break
+        _draw_selector(console, title, options, state, page_size=page_size)
+
+    # Match the old transient selector semantics: once the user confirms/cancels,
+    # remove the selector page before the caller renders its next screen.
+    _clear_selector_screen(console)
     if state.cancelled:
         return None
     assert state.selected is not None
     return [option.value for index, option in enumerate(options) if index in state.selected]
+
+
+def _draw_selector(
+    console: Console,
+    title: str,
+    options: Sequence[MultiSelectOption],
+    state: MultiSelectState,
+    *,
+    page_size: int,
+) -> None:
+    _clear_selector_screen(console)
+    console.print(_render(title, options, state, page_size=page_size))
+
+
+def _clear_selector_screen(console: Console) -> None:
+    """Use only the basic erase-display + cursor-home terminal operation."""
+    if not console.is_terminal:
+        return
+    try:
+        console.clear(home=True)
+    except (AttributeError, OSError):
+        # A non-standard output stream should not make selection unusable.
+        pass
 
 
 def _option_cell(option: MultiSelectOption, *, cursor: bool, selected: bool) -> Text:
@@ -179,11 +209,19 @@ def _render(
     pages = max(1, (len(options) + page_size - 1) // page_size)
     detail = Text()
     if current.detail:
-        detail.append("Current: ", style="bold")
+        detail.append(_tr("当前：", "Current: "), style="bold")
         detail.append(current.detail)
-    status = Text(f"selected {len(state.selected)}/{len(options)} · page {page + 1}/{pages}")
+    status = Text(
+        _tr(
+            f"已选择 {len(state.selected)}/{len(options)} · 第 {page + 1}/{pages} 页",
+            f"selected {len(state.selected)}/{len(options)} · page {page + 1}/{pages}",
+        )
+    )
     help_text = Text(
-        "↑↓←→ / HJKL move · Space toggle · Enter save · Q/Esc cancel · A all · N clear",
+        _tr(
+            "↑↓←→ / HJKL 移动 · Space 选择/取消 · Enter 保存 · Q/Esc 取消 · A 全选 · N 清空",
+            "↑↓←→ / HJKL move · Space toggle · Enter save · Q/Esc cancel · A all · N clear",
+        ),
         style="dim",
     )
     return Group(
@@ -271,3 +309,7 @@ def _read_key_posix() -> str:
         return _decode_escape_sequence(sequence.decode("ascii", errors="ignore"))
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _tr(zh: str, en: str) -> str:
+    return zh if get_language() == "zh-CN" else en
