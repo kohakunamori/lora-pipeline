@@ -4,7 +4,12 @@ from io import StringIO
 
 from rich.console import Console
 
-from pipeline.interactive_multiselect import MultiSelectOption, MultiSelectState, select_many
+from pipeline.interactive_multiselect import (
+    MultiSelectOption,
+    MultiSelectState,
+    _render,
+    select_many,
+)
 
 
 def test_multiselect_state_uses_space_to_toggle_and_enter_to_confirm() -> None:
@@ -32,3 +37,21 @@ def test_select_many_keyboard_contract() -> None:
         key_reader=lambda: next(keys),
     )
     assert selected == ["1", "3"]
+
+
+def test_multiselect_render_shows_literal_selected_and_unselected_markers() -> None:
+    output = StringIO()
+    console = Console(file=output, force_terminal=False, width=100)
+    options = [
+        MultiSelectOption("selected", "selected tag", "Selected detail"),
+        MultiSelectOption("plain", "plain tag", "Plain detail"),
+    ]
+    state = MultiSelectState(size=2, cursor=0, selected={0})
+
+    console.print(_render("tags", options, state, page_size=30))
+    rendered = output.getvalue()
+
+    assert "> [x] selected tag" in rendered
+    assert "[ ] plain tag" in rendered
+    assert "selected 1/2" in rendered
+    assert "Selected detail" in rendered

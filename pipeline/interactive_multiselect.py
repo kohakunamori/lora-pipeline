@@ -7,9 +7,9 @@ from typing import Callable, Iterable, Sequence
 
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .models import PipelineError
 
@@ -103,6 +103,16 @@ def select_many(
     return [option.value for index, option in enumerate(options) if index in state.selected]
 
 
+def _option_cell(option: MultiSelectOption, *, cursor: bool, selected: bool) -> Text:
+    """Build a literal option row without letting checkbox text be parsed as Rich markup."""
+    cell = Text()
+    cell.append("> " if cursor else "  ", style="bold cyan" if cursor else None)
+    cell.append("[x]" if selected else "[ ]", style="green" if selected else "dim")
+    cell.append(" ")
+    cell.append(option.label)
+    return cell
+
+
 def _render(
     title: str,
     options: Sequence[MultiSelectOption],
@@ -122,23 +132,27 @@ def _render(
         table.add_column(ratio=1)
     assert state.selected is not None
     for row in range(rows):
-        cells: list[str] = []
+        cells: list[Text] = []
         for column in range(state.columns):
             index = start + row * state.columns + column
             if index >= end:
-                cells.append("")
+                cells.append(Text())
                 continue
             option = options[index]
-            cursor = "[bold cyan]>[/bold cyan]" if index == state.cursor else " "
-            mark = "[green][x][/green]" if index in state.selected else "[dim][ ][/dim]"
-            cells.append(f"{cursor} {mark} {escape(option.label)}")
+            cells.append(
+                _option_cell(
+                    option,
+                    cursor=index == state.cursor,
+                    selected=index in state.selected,
+                )
+            )
         table.add_row(*cells)
     current = options[state.cursor]
     footer = (
         f"↑↓←→ move · Space select · Enter confirm · A all · N clear\n"
         f"selected {len(state.selected)}/{len(options)} · page {page + 1}/{max(1, (len(options) + page_size - 1) // page_size)}"
     )
-    detail = escape(current.detail) if current.detail else ""
+    detail = Text(current.detail) if current.detail else None
     return Group(
         Panel(table, title=title),
         Panel(detail or footer, subtitle=footer if detail else None, border_style="dim"),
