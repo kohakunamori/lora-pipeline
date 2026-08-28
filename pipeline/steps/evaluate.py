@@ -21,6 +21,7 @@ from ..evaluation.contact_sheet import (
 from ..evaluation.generation import GenerationBackend, SdScriptsGenerator
 from ..evaluation.leakage import character_trigger_leakage, style_trigger_leakage
 from ..evaluation.outfit import outfit_retention_proxy, outfit_trigger_leakage_proxy
+from ..evaluation.report_samples import build_sample_history
 from ..evaluation.style import cross_content_metrics
 from ..models import GeneratedImage, GenerationCase, PipelineError, StepResult
 from ..prepared import load_current_generation
@@ -457,6 +458,13 @@ def _write_report(
         if metadata_path.exists()
         else {}
     )
+    exported_checkpoints = [Path(str(value)) for value in run_record.get("checkpoints", [])]
+    history_stages = ("screening", "full") if stage == "full" else (stage,)
+    sample_history_html, sample_history = build_sample_history(
+        run_dir,
+        exported_checkpoints,
+        include_stages=history_stages,
+    )
     payload = {
         "project": state.name,
         "concept_type": state.concept_type,
@@ -480,7 +488,9 @@ def _write_report(
         "alpha": profiles.get("training", {}).get("network_alpha"),
         "learning_rate": profiles.get("training", {}).get("unet_lr"),
         "accounting": run_record.get("accounting", {}),
+        "exported_checkpoints": [path.name for path in exported_checkpoints],
         "candidate_checkpoints": [path.name for path in checkpoints],
+        "sample_evidence": sample_history,
         "evaluation_metrics": metrics,
         "style_distribution": dataset_bias,
         "selection": "Manual promotion is required; evaluation does not create best.safetensors",
@@ -500,7 +510,9 @@ def _write_report(
         f"<h1>{html.escape(state.name)} — {html.escape(stage)} evaluation</h1>"
         "<p class='warning'><strong>Manual selection required.</strong> Automatic metrics are auxiliary. "
         "Use the project dashboard's Promote a checkpoint action only after reviewing aligned sheets.</p>"
+        "<h2>Current-stage contact sheets</h2>"
         f"{sheet_html}"
+        f"{sample_history_html}"
         "<h2>Run summary</h2>"
         f"<pre>{html.escape(json.dumps(payload, indent=2, ensure_ascii=False))}</pre>"
         "<h2>Training config</h2>"
