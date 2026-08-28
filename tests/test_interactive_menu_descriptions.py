@@ -21,9 +21,19 @@ def test_menu_descriptions_preserve_explicit_text_and_fill_common_actions() -> N
     assert all(item.description.strip() for item in items)
 
 
-def test_unknown_menu_action_still_gets_a_localized_non_empty_description() -> None:
+def test_unknown_domain_option_warns_about_missing_help_instead_of_inventing_meaning() -> None:
     i18n.set_language("zh-CN")
     item = with_menu_descriptions([MenuItem("future_action", "未来功能")])[0]
 
     assert item.description.strip()
     assert "未来功能" in item.description
+    assert "尚未提供专用说明" in item.description
+    assert "对应的操作流程" not in item.description
+
+
+def test_explicit_domain_help_remains_authoritative() -> None:
+    i18n.set_language("zh-CN")
+    explanation = "角色 Token 是代表角色身份的专用触发词，会参与训练 caption 组合。"
+    item = with_menu_descriptions([MenuItem("token", "修改角色 Token", explanation)])[0]
+
+    assert item.description == explanation
