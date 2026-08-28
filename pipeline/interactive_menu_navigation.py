@@ -8,7 +8,6 @@ from types import FrameType
 from typing import Sequence
 
 from rich.console import Console, Group
-from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
@@ -111,7 +110,7 @@ class NumberMenuState:
 
 
 def install_menu_navigation() -> None:
-    """Install breadcrumb, screen-refresh, and Esc semantics for numbered menus."""
+    """Install breadcrumb, stable numbered input, screen refresh, and Esc semantics."""
     current = Wizard._menu
     if getattr(current, "_lora_navigation_menu", False):
         return
@@ -138,6 +137,16 @@ def _run_numbered_menu(
     default: str | None,
     key_reader=None,
 ) -> str:
+    """Render a numbered menu once and keep only the small prompt line dynamic.
+
+    Rich ``Live`` previously rewrote the whole table after every key press. Some
+    SSH/WebTTY terminals do not reliably implement the cursor-up sequences Live
+    needs, so every refresh was appended to the screen instead of replacing the
+    previous frame. A numbered CLI menu does not need full-screen animation:
+    render the breadcrumb/table once, update only the final prompt with carriage
+    return, then clear the completed page before the next screen is rendered.
+    """
+
     items = with_menu_descriptions(items)
     if not items:
         raise ValueError("Menu requires at least one item")
@@ -158,44 +167,48 @@ def _run_numbered_menu(
     quit_target = "quit" if any(item.value == "quit" for item in items) else None
     root_menu = len(path) == 1 and quit_target is not None
     read_key = key_reader or read_number_menu_key
+
+    # Important: do not clear here. Many pages render a dataset/project summary
+    # immediately before calling _menu(); the static numbered menu must remain on
+    # the same page as that context. The previous menu cleared itself on exit.
+    wizard.console.print(
+        _render_numbered_menu(
+            title,
+            items,
+            state,
+            path,
+            escape_target=escape_target,
+            root_menu=root_menu,
+        )
+    )
+
+    prompt_width = 0
     chosen_value: str | None = None
     chosen_label: str | None = None
+    while chosen_value is None:
+        prompt_width = _rewrite_menu_prompt(
+            wizard.console,
+            _menu_prompt(items, state, root_menu=root_menu),
+            previous_width=prompt_width,
+        )
+        key = read_key()
+        result = state.apply(
+            key,
+            escape_target=escape_target,
+            quit_target=quit_target,
+            root_menu=root_menu,
+        )
+        if result == "select":
+            selected = items[state.cursor]
+            chosen_value = selected.value
+            chosen_label = selected.label
+            break
+        if result is not None:
+            chosen_value = result
+            chosen_label = next((item.label for item in items if item.value == result), None)
+            break
 
-    with Live(
-        _render_numbered_menu(title, items, state, path, escape_target=escape_target, root_menu=root_menu),
-        console=wizard.console,
-        refresh_per_second=12,
-        transient=True,
-    ) as live:
-        while chosen_value is None:
-            key = read_key()
-            result = state.apply(
-                key,
-                escape_target=escape_target,
-                quit_target=quit_target,
-                root_menu=root_menu,
-            )
-            if result == "select":
-                selected = items[state.cursor]
-                chosen_value = selected.value
-                chosen_label = selected.label
-                break
-            if result is not None:
-                chosen_value = result
-                chosen_label = next((item.label for item in items if item.value == result), None)
-                break
-            live.update(
-                _render_numbered_menu(
-                    title,
-                    items,
-                    state,
-                    path,
-                    escape_target=escape_target,
-                    root_menu=root_menu,
-                ),
-                refresh=True,
-            )
-
+    _finish_menu_prompt(wizard.console, prompt_width)
     assert chosen_value is not None
     _record_selected_label(wizard, caller, chosen_label)
     _clear_terminal(wizard.console)
@@ -275,6 +288,8 @@ def _render_numbered_menu(
     escape_target: str | None,
     root_menu: bool,
 ):
+    del state  # Selection state is shown on the lightweight prompt line below.
+
     breadcrumb = Text()
     breadcrumb.append(_tr("路径：", "Path: "), style="dim")
     for index, part in enumerate(path):
@@ -287,42 +302,65 @@ def _render_numbered_menu(
     table.add_column(_tr("操作", "Action"), style="bold")
     table.add_column(_tr("说明", "Description"))
     for index, item in enumerate(items, start=1):
-        table.add_row(
-            str(index),
-            item.label,
-            item.description,
-            style="reverse" if index - 1 == state.cursor else None,
-        )
-
-    typed = state.typed or str(state.cursor + 1)
-    status = Text()
-    status.append(_tr("当前编号：", "Number: "), style="dim")
-    status.append(typed, style="bold cyan")
-    if state.exit_armed:
-        status.append(
-            _tr("  · 再按一次 Esc 退出", "  · press Esc again to exit"),
-            style="bold yellow",
-        )
-    elif state.message:
-        status.append("  · " + state.message, style="yellow")
+        table.add_row(str(index), item.label, item.description)
 
     if root_menu:
         help_line = _tr(
-            "↑/↓ 选择 · 输入编号 · Enter 确认 · Esc×2 退出",
-            "↑/↓ select · type number · Enter confirm · Esc×2 exit",
+            "↑/↓ 改变当前编号 · 也可直接输入编号 · Enter 确认 · Esc×2 退出",
+            "↑/↓ change number · or type a number · Enter confirm · Esc×2 exit",
         )
     elif escape_target is not None:
         help_line = _tr(
-            "↑/↓ 选择 · 输入编号 · Enter 确认 · Esc 返回上一菜单",
-            "↑/↓ select · type number · Enter confirm · Esc back",
+            "↑/↓ 改变当前编号 · 也可直接输入编号 · Enter 确认 · Esc 返回上一菜单",
+            "↑/↓ change number · or type a number · Enter confirm · Esc back",
         )
     else:
         help_line = _tr(
-            "↑/↓ 选择 · 输入编号 · Enter 确认",
-            "↑/↓ select · type number · Enter confirm",
+            "↑/↓ 改变当前编号 · 也可直接输入编号 · Enter 确认",
+            "↑/↓ change number · or type a number · Enter confirm",
         )
-    help_text = Text(help_line, style="dim")
-    return Group(breadcrumb, table, status, help_text)
+    return Group(breadcrumb, table, Text(help_line, style="dim"))
+
+
+def _menu_prompt(items: Sequence[MenuItem], state: NumberMenuState, *, root_menu: bool) -> str:
+    number = int(state.typed) if state.typed else state.cursor + 1
+    label = items[state.cursor].label
+    prompt = _tr(
+        f"当前：{number} · {label}",
+        f"Current: {number} · {label}",
+    )
+    if state.exit_armed and root_menu:
+        prompt += _tr("  · 再按一次 Esc 退出", "  · press Esc again to exit")
+    elif state.message:
+        prompt += "  · " + state.message
+    return prompt
+
+
+def _rewrite_menu_prompt(console: Console, text: str, *, previous_width: int) -> int:
+    """Rewrite one prompt line using only carriage return and spaces.
+
+    Avoid ANSI cursor-up / erase-display sequences here: those are exactly what
+    caused full menu frames to accumulate on some WebTTY/SSH frontends.
+    """
+
+    plain = str(text)
+    width = max(previous_width, len(plain))
+    stream = console.file
+    try:
+        stream.write("\r" + plain + (" " * max(0, width - len(plain))))
+        stream.flush()
+    except (AttributeError, OSError):
+        console.print(plain, end="")
+    return len(plain)
+
+
+def _finish_menu_prompt(console: Console, previous_width: int) -> None:
+    stream = console.file
+    try:
+        stream.write("\r" + (" " * previous_width) + "\r\n")
+        stream.flush()
+    except (AttributeError, OSError):
+        console.print()
 
 
 def read_number_menu_key() -> str:
