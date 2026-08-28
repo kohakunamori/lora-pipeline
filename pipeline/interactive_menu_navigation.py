@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import FrameType
 from typing import Sequence
 
+from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
@@ -340,18 +341,20 @@ def _rewrite_menu_prompt(console: Console, text: str, *, previous_width: int) ->
     """Rewrite one prompt line using only carriage return and spaces.
 
     Avoid ANSI cursor-up / erase-display sequences here: those are exactly what
-    caused full menu frames to accumulate on some WebTTY/SSH frontends.
+    caused full menu frames to accumulate on some WebTTY/SSH frontends. Width is
+    measured in terminal cells so CJK text is erased cleanly as labels change.
     """
 
     plain = str(text)
-    width = max(previous_width, len(plain))
+    current_width = cell_len(plain)
+    width = max(previous_width, current_width)
     stream = console.file
     try:
-        stream.write("\r" + plain + (" " * max(0, width - len(plain))))
+        stream.write("\r" + plain + (" " * max(0, width - current_width)))
         stream.flush()
     except (AttributeError, OSError):
         console.print(plain, end="")
-    return len(plain)
+    return current_width
 
 
 def _finish_menu_prompt(console: Console, previous_width: int) -> None:
