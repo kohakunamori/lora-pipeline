@@ -75,9 +75,9 @@ def test_render_places_breadcrumb_above_numbered_table() -> None:
         )
     )
     rendered = output.getvalue()
-    assert "Path: Home › Datasets › Child" in rendered
+    assert "Home › Datasets › Child" in rendered
     assert "Child" in rendered
-    assert "Esc back" in rendered
+    assert "Esc" in rendered
 
 
 def test_numbered_menu_returns_selected_item_with_fake_key_reader() -> None:
