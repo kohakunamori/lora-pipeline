@@ -115,3 +115,32 @@ overrides:
 ```
 
 CLI 和 Web 都会显示这些参数的用途、建议以及当前预设值。Web 中留空即恢复策略默认值；CLI 的“恢复关键参数预设”只删除这些用户可见的关键覆盖项，不会误删其他专家级 override。
+
+### 可移植的 LoRA 模型 metadata
+
+可以在同一个 `overrides` 中声明发布信息；未声明时不会改变训练参数或
+`sd-scripts` 的默认 metadata 行为：
+
+```yaml
+overrides:
+  metadata:
+    title: "Misuzu outfit LoRA"
+    author: "your-name"
+    description: "Character outfit LoRA"
+    license: "以实际授权为准"
+    tags:
+      - character
+      - outfit
+    trigger_phrase: "misuzu_nic26"
+    usage_hint: "Use trigger phrase: misuzu_nic26"
+    thumbnail:
+      enabled: true
+      path: "/absolute/path/to/preview.png"
+```
+
+`trigger_phrase: auto` 会从 immutable prepared caption snapshot 中保守推断
+触发词；无法确认时保持为空。缩略图会校验格式并派生为 `run/config/model-thumbnail.jpg`
+（最大边 256px），不会修改源图。训练启动时已确定的字段会写入 `train.toml`，
+并由 pinned `sd-scripts` 写入每个 checkpoint；训练后才出现的 `samples/` 预览则通过
+原子 safetensors metadata rewrite 补入。`run-metadata.json` 只记录路径和来源，
+不会保存 base64 图片数据。

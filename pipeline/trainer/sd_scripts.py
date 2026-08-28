@@ -15,6 +15,13 @@ from typing import Any, Mapping, Sequence, TextIO
 from .. import gpu_resources
 from ..config import repository_root, sha256_file, stable_hash, write_json_atomic
 from ..models import ExternalCommandError, PipelineError, TrainingRequest, TrainingResult
+from ..model_artifact import (
+    ModelArtifactMetadata,
+    build_modelspec_metadata,
+    build_sd_scripts_metadata,
+    resolve_model_metadata,
+    rewrite_safetensors_metadata,
+)
 from ..prepared import load_current_generation
 from .base import TrainerBackend
 
@@ -73,6 +80,81 @@ def write_dataset_toml(
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _supported_metadata_parameters(sd_scripts: Path, entrypoint: Path) -> set[str]:
+    """Discover ModelSpec arguments when a checkout is available.
+
+    The repository records a pinned sd-scripts commit, but deployments keep
+    that checkout outside this repository.  Newer sd-scripts versions expose
+    ``metadata_*`` arguments; older checkouts need the post-processing fallback
+    below.  If no source files are available (for example a config-only test
+    fixture), retain the modern default so train.toml remains forward
+    compatible.
+    """
+
+    all_names = {
+        "metadata_title",
+        "metadata_author",
+        "metadata_description",
+        "metadata_license",
+        "metadata_tags",
+        "metadata_usage_hint",
+        "metadata_thumbnail",
+        "metadata_merged_from",
+        "metadata_trigger_phrase",
+    }
+    candidates = [
+        entrypoint,
+        sd_scripts / "train_network.py",
+        sd_scripts / "sdxl_train_network.py",
+        sd_scripts / "library" / "sai_model_spec.py",
+    ]
+    existing: list[Path] = []
+    seen_paths: set[Path] = set()
+    for path in candidates:
+        if path in seen_paths or not path.is_file():
+            continue
+        seen_paths.add(path)
+        existing.append(path)
+    if len(existing) <= 1 and existing and existing[0] == entrypoint:
+        try:
+            text = entrypoint.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return all_names
+        if "metadata_" not in text:
+            return all_names
+    snippets: list[str] = []
+    for path in existing:
+        try:
+            snippets.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    combined = "\n".join(snippets)
+    if not combined or "metadata_" not in combined:
+        return set()
+    return {name for name in all_names if name in combined}
+
+
+def _postprocess_checkpoint_metadata(
+    checkpoints: Sequence[Path], metadata: ModelArtifactMetadata
+) -> None:
+    updates = build_modelspec_metadata(metadata)
+    if not updates:
+        return
+    try:
+        from safetensors import safe_open
+    except ImportError as exc:  # pragma: no cover - validated training env owns dependency
+        raise PipelineError("safetensors is required to attach LoRA model metadata") from exc
+    for checkpoint in checkpoints:
+        try:
+            with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
+                current = dict(handle.metadata() or {})
+        except Exception as exc:
+            raise PipelineError(f"Could not inspect checkpoint metadata {checkpoint}: {exc}") from exc
+        if all(current.get(key) == value for key, value in updates.items()):
+            continue
+        rewrite_safetensors_metadata(checkpoint, updates)
 
 
 def materialize_dataset_snapshot(
@@ -388,6 +470,15 @@ class SdScriptsTrainer(TrainerBackend):
             materialize_dataset_snapshot(request.project_dir, work_dataset)
         )
         shutil.copy2(work_dataset / "snapshot-manifest.json", persistent_config / "dataset-snapshot.json")
+        snapshot_payload = json.loads(
+            (work_dataset / "snapshot-manifest.json").read_text(encoding="utf-8")
+        )
+        model_metadata = resolve_model_metadata(
+            merged,
+            run_dir=request.run_dir,
+            captions=snapshot_payload.get("images", []),
+            samples_dir=request.run_dir / "samples",
+        )
 
         target_candidates = max(
             1, int(merged.get("checkpoints", {}).get("target_candidates", 5))
@@ -440,6 +531,15 @@ class SdScriptsTrainer(TrainerBackend):
             "save_state": save_state,
             "resume": str(request.resume_state) if request.resume_state else None,
         }
+        metadata_parameters = build_sd_scripts_metadata(model_metadata)
+        supported_metadata = _supported_metadata_parameters(sd_scripts, entrypoint)
+        train_values.update(
+            {
+                key: value
+                for key, value in metadata_parameters.items()
+                if key in supported_metadata
+            }
+        )
         write_flat_toml(persistent_config / "train.toml", train_values)
         write_dataset_toml(
             persistent_config / "dataset.toml", dataset_dirs=dataset_dirs, merged=merged
@@ -521,6 +621,15 @@ class SdScriptsTrainer(TrainerBackend):
                 "log_dir": str(work_logs),
             },
             "resume_state": str(request.resume_state) if request.resume_state else None,
+            "model_metadata": model_metadata.as_run_dict(),
+            "metadata_delivery": {
+                "native_parameters": sorted(
+                    key for key in metadata_parameters if key in supported_metadata
+                ),
+                "postprocess_parameters": sorted(
+                    key for key in metadata_parameters if key not in supported_metadata
+                ),
+            },
         }
         write_json_atomic(persistent_config / "run-metadata.json", metadata)
         shutil.copy2(
@@ -572,6 +681,21 @@ class SdScriptsTrainer(TrainerBackend):
             checkpoint_source.glob("*.safetensors"),
             key=lambda path: (path.stat().st_mtime_ns, path.name),
         )
+        if exit_code == 0:
+            # Samples may only be generated after training. Resolve once more
+            # so a deterministic sample preview can be embedded without
+            # claiming it was present in the training command. Explicit config
+            # metadata remains the same on this second pass.
+            model_metadata = resolve_model_metadata(
+                merged,
+                run_dir=request.run_dir,
+                captions=snapshot_payload.get("images", []),
+                samples_dir=request.run_dir / "samples",
+            )
+            _postprocess_checkpoint_metadata(checkpoints, model_metadata)
+            metadata["metadata_delivery"]["postprocess_applied"] = sorted(
+                build_modelspec_metadata(model_metadata)
+            )
         gpu_metrics = monitor.summary()
         metrics = {
             "exit_code": exit_code,
@@ -595,6 +719,7 @@ class SdScriptsTrainer(TrainerBackend):
             persistent_checkpoints,
             enabled=str(training.get("state_retention", "latest")) == "latest",
         )
+        metadata["model_metadata"] = model_metadata.as_run_dict()
         metadata["result"] = {**metrics, "checkpoints": [str(path) for path in checkpoints]}
         write_json_atomic(persistent_config / "run-metadata.json", metadata)
         if exit_code or not checkpoints:
