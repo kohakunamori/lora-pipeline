@@ -24,6 +24,7 @@ _ARROW_KEYS = {
 _PLAIN_KEYS = {
     "a": "all",
     "n": "none",
+    "q": "cancel",
     "h": "left",
     "j": "down",
     "k": "up",
@@ -44,6 +45,7 @@ class MultiSelectState:
     columns: int = 1
     cursor: int = 0
     selected: set[int] | None = None
+    cancelled: bool = False
 
     def __post_init__(self) -> None:
         self.columns = max(1, self.columns)
@@ -54,7 +56,10 @@ class MultiSelectState:
             self.cursor = min(max(0, self.cursor), self.size - 1)
 
     def apply(self, key: str) -> bool:
-        """Apply one logical key. Return True when Enter confirms."""
+        """Apply one logical key. Return True when the selector should close."""
+        if key == "cancel":
+            self.cancelled = True
+            return True
         if self.size <= 0:
             return key == "enter"
         if key == "left":
@@ -89,8 +94,8 @@ def select_many(
     columns: int = 1,
     page_size: int = 30,
     key_reader: Callable[[], str] | None = None,
-) -> list[str]:
-    """Keyboard-first bulk selector: arrows/HJKL move, Space toggles, Enter confirms."""
+) -> list[str] | None:
+    """Keyboard-first selector. Enter commits; Q/Esc cancels without a result."""
     if not options:
         return []
     selected_values = set(selected)
@@ -116,6 +121,8 @@ def select_many(
             if state.apply(key):
                 break
             live.update(_render(title, options, state, page_size=page_size), refresh=True)
+    if state.cancelled:
+        return None
     assert state.selected is not None
     return [option.value for index, option in enumerate(options) if index in state.selected]
 
@@ -144,9 +151,12 @@ def _render(
     start = page * page_size
     end = min(len(options), start + page_size)
     rows = (end - start + state.columns - 1) // state.columns
-    table = Table.grid(expand=True)
+
+    # This is a selector, not a dashboard: size the list to its contents instead
+    # of stretching both the table and surrounding panels across the terminal.
+    table = Table.grid(padding=(0, 2))
     for _ in range(state.columns):
-        table.add_column(ratio=1)
+        table.add_column()
     assert state.selected is not None
     for row in range(rows):
         cells: list[Text] = []
@@ -164,15 +174,23 @@ def _render(
                 )
             )
         table.add_row(*cells)
+
     current = options[state.cursor]
-    footer = (
-        f"↑↓←→ / HJKL move · Space select · Enter confirm · A all · N clear\n"
-        f"selected {len(state.selected)}/{len(options)} · page {page + 1}/{max(1, (len(options) + page_size - 1) // page_size)}"
+    pages = max(1, (len(options) + page_size - 1) // page_size)
+    detail = Text()
+    if current.detail:
+        detail.append("Current: ", style="bold")
+        detail.append(current.detail)
+    status = Text(f"selected {len(state.selected)}/{len(options)} · page {page + 1}/{pages}")
+    help_text = Text(
+        "↑↓←→ / HJKL move · Space toggle · Enter save · Q/Esc cancel · A all · N clear",
+        style="dim",
     )
-    detail = Text(current.detail) if current.detail else None
     return Group(
-        Panel(table, title=title),
-        Panel(detail or footer, subtitle=footer if detail else None, border_style="dim"),
+        Panel.fit(table, title=title, border_style="cyan", padding=(0, 1)),
+        detail,
+        status,
+        help_text,
     )
 
 
@@ -181,11 +199,15 @@ def _decode_plain_key(value: str) -> str:
         return "enter"
     if value == " ":
         return "space"
+    if value == "\x1b":
+        return "cancel"
     return _PLAIN_KEYS.get(value.casefold(), "unknown")
 
 
 def _decode_escape_sequence(sequence: str) -> str:
-    """Decode common ANSI/VT arrow-key forms from bytes following ESC."""
+    """Decode bytes following ESC; an ESC without a sequence means cancel."""
+    if not sequence:
+        return "cancel"
     if len(sequence) < 2 or sequence[0] not in {"[", "O"}:
         return "unknown"
     final = sequence[-1]

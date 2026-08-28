@@ -245,6 +245,9 @@ class InteractiveWizard(BaseInteractiveWizard):
         if not options:
             self.console.print(self._b("[yellow]没有共有 Tag 候选；请先 Auto-tag。[/yellow]", "[yellow]No common tag candidates; run Auto-tag first.[/yellow]")); return
         selected = select_many(self.console, self._b("选择角色特征 Tags", "Select character feature tags"), options, selected=current, page_size=24)
+        if selected is None:
+            self.console.print(self._b("[dim]已取消；角色特征未修改。[/dim]", "[dim]Cancelled; character features were not changed.[/dim]"))
+            return
         set_character_features(workspace, selected)
 
     def _add_outfit(self, workspace: DatasetWorkspace) -> None:
@@ -253,6 +256,8 @@ class InteractiveWizard(BaseInteractiveWizard):
         outfit_id = self._ask_text(self._b("服饰 ID", "Outfit id"), default=_slug(label)).strip()
         token = self._ask_text(self._b("服饰 Token", "Outfit token"), default=f"{semantic['character']['token']}_{_slug(outfit_id)}").strip()
         images = self._choose_outfit_images(workspace, semantic, None)
+        if images is None:
+            self.console.print(self._b("[yellow]已取消；未创建服饰。[/yellow]", "[yellow]Cancelled; outfit was not created.[/yellow]")); return
         if not images:
             self.console.print(self._b("[yellow]未选择图片，已取消。[/yellow]", "[yellow]No images selected; cancelled.[/yellow]")); return
         add_outfit(workspace, outfit_id, label=label, token=token, image_keys=images)
@@ -304,7 +309,8 @@ class InteractiveWizard(BaseInteractiveWizard):
             elif action == "features": self._choose_outfit_features(workspace, outfit_id)
             elif action == "images":
                 images = self._choose_outfit_images(workspace, semantic, outfit_id)
-                if images: set_outfit_images(workspace, outfit_id, images)
+                if images is not None:
+                    set_outfit_images(workspace, outfit_id, images)
 
     def _choose_outfit_features(self, workspace: DatasetWorkspace, outfit_id: str) -> None:
         semantic = load_semantics(workspace, create=True); assert semantic is not None
@@ -314,6 +320,9 @@ class InteractiveWizard(BaseInteractiveWizard):
         if not options:
             self.console.print(self._b("[yellow]没有服饰 Tag 候选。[/yellow]", "[yellow]No outfit tag candidates.[/yellow]")); return
         selected = select_many(self.console, self._b("选择服饰 Tags", "Select outfit feature tags"), options, selected=current, page_size=24)
+        if selected is None:
+            self.console.print(self._b("[dim]已取消；服饰 Tags 未修改。[/dim]", "[dim]Cancelled; outfit tags were not changed.[/dim]"))
+            return
         set_outfit_features(workspace, outfit_id, selected)
 
     def _feature_options(self, rows: Sequence[dict], current: Sequence[str], *, outfit: bool) -> list[MultiSelectOption]:
@@ -327,7 +336,7 @@ class InteractiveWizard(BaseInteractiveWizard):
             result.append(MultiSelectOption(tag, label, self._b(f"覆盖率 {coverage:.0%}" + (f" · 服饰区分度 Δ={specificity:+.2f}" if outfit else ""), f"Coverage {coverage:.0%}" + (f" · outfit specificity Δ={specificity:+.2f}" if outfit else ""))))
         return result
 
-    def _choose_outfit_images(self, workspace: DatasetWorkspace, semantic: dict, outfit_id: str | None) -> list[str]:
+    def _choose_outfit_images(self, workspace: DatasetWorkspace, semantic: dict, outfit_id: str | None) -> list[str] | None:
         current = image_keys_for_outfit(workspace, semantic, outfit_id) if outfit_id else []
         options = [
             MultiSelectOption(
