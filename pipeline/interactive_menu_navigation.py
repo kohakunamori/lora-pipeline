@@ -86,9 +86,10 @@ class NumberMenuState:
             digit = key.split(":", 1)[1]
             candidate = self.typed + digit
             # Keep a plausible prefix so menus with >=10 rows remain usable.
-            if candidate and int(candidate) <= self.size:
+            number = int(candidate) if candidate else 0
+            if 1 <= number <= self.size:
                 self.typed = candidate
-                self.cursor = int(candidate) - 1
+                self.cursor = number - 1
             else:
                 self.message = _tr("编号超出当前菜单范围。", "That number is outside this menu.")
         elif key == "enter":
