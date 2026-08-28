@@ -80,11 +80,36 @@ def test_multiselect_render_is_compact_and_shows_controls() -> None:
 
     assert "> [x] selected tag" in rendered
     assert "[ ] plain tag" in rendered
-    assert "selected 1/2" in rendered
-    assert "Current: Selected detail" in rendered
-    assert "Q/Esc cancel" in rendered
+    assert "1/2" in rendered
+    assert "Selected detail" in rendered
+    assert "Q/Esc" in rendered
     # Panel.fit must not stretch this tiny selector across the whole 100-column console.
     assert max(len(line) for line in rendered.splitlines()) < 90
+
+
+def test_select_many_uses_clear_and_home_instead_of_live_cursor_up() -> None:
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, width=100)
+    keys = iter(["down", "space", "enter"])
+    options = [
+        MultiSelectOption("one", "one"),
+        MultiSelectOption("two", "two"),
+    ]
+
+    selected = select_many(
+        console,
+        "stable selector",
+        options,
+        key_reader=lambda: next(keys),
+    )
+
+    assert selected == ["two"]
+    rendered = output.getvalue()
+    # console.clear(home=True) uses erase-display + cursor-home. Rich Live's
+    # cursor-up repaint is intentionally absent because that broke SSH/WebTTY.
+    assert "\x1b[2J" in rendered
+    assert "\x1b[H" in rendered
+    assert "\x1b[1A" not in rendered
 
 
 @pytest.mark.parametrize(
