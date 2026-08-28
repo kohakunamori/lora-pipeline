@@ -48,6 +48,15 @@ class NumberMenuState:
     ) -> str | None:
         """Apply one key and return a special action when the menu should close."""
         self.message = ""
+        if key == "double_escape":
+            self.typed = ""
+            self.exit_armed = False
+            if root_menu and quit_target is not None:
+                return quit_target
+            if escape_target is not None:
+                return escape_target
+            self.message = _tr("当前菜单没有可返回的上一层。", "This menu has no previous-menu action.")
+            return None
         if key == "escape":
             self.typed = ""
             if root_menu and quit_target is not None:
@@ -349,6 +358,8 @@ def _read_number_menu_key_posix() -> str:
             value = os.read(fd, 1)
             if not value:
                 break
+            if not sequence and value == b"\x1b":
+                return "double_escape"
             sequence.extend(value)
             if len(sequence) >= 2 and sequence[-1:] in b"ABCD~":
                 break
