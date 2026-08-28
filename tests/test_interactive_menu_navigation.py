@@ -26,6 +26,14 @@ def test_root_requires_two_consecutive_escape_presses_to_exit() -> None:
     assert state.apply("escape", escape_target=None, quit_target="quit", root_menu=True) == "quit"
 
 
+def test_fast_double_escape_event_exits_root_and_backs_out_of_submenu() -> None:
+    root = NumberMenuState(size=4)
+    assert root.apply("double_escape", escape_target=None, quit_target="quit", root_menu=True) == "quit"
+
+    child = NumberMenuState(size=3)
+    assert child.apply("double_escape", escape_target="back", quit_target=None, root_menu=False) == "back"
+
+
 def test_non_escape_key_disarms_root_exit_confirmation() -> None:
     state = NumberMenuState(size=4)
     assert state.apply("escape", escape_target=None, quit_target="quit", root_menu=True) is None
