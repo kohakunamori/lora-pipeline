@@ -1,28 +1,57 @@
 from __future__ import annotations
 
-from rich.errors import MarkupError
-from rich.text import Text
+import re
 
 from . import interactive_menu_navigation as navigation
 from .wizard import MenuItem
 
 
+_RICH_STYLE_WORDS = frozenset(
+    {
+        "black",
+        "blue",
+        "bold",
+        "bright_black",
+        "bright_blue",
+        "bright_cyan",
+        "bright_green",
+        "bright_magenta",
+        "bright_red",
+        "bright_white",
+        "bright_yellow",
+        "cyan",
+        "dim",
+        "green",
+        "italic",
+        "magenta",
+        "red",
+        "reverse",
+        "strike",
+        "underline",
+        "white",
+        "yellow",
+    }
+)
+_STYLE_TAG = re.compile(r"\[(/?)([^\[\]]+)\]")
+
+
 def plain_rich_label(value: str) -> str:
-    """Return the visible text of a Rich-markup menu label.
+    """Strip only known presentation tags from a menu label.
 
     Numbered menu tables may intentionally use Rich markup (for example red
     destructive actions), but the lightweight prompt line and breadcrumb are
-    written as literal text. Feeding markup strings into those literal surfaces
-    exposes tags such as ``[red]`` to the user.
+    written as literal text. Unknown bracketed text is preserved because a
+    user-controlled filename such as ``model[custom].safetensors`` is valid
+    content, not presentation markup.
     """
 
-    text = str(value)
-    try:
-        return Text.from_markup(text).plain
-    except MarkupError:
-        # A user-controlled filename may legitimately contain square brackets.
-        # If it is not valid Rich markup, keep the original text unchanged.
-        return text
+    def replace(match: re.Match[str]) -> str:
+        words = match.group(2).strip().casefold().split()
+        if words and all(word in _RICH_STYLE_WORDS for word in words):
+            return ""
+        return match.group(0)
+
+    return _STYLE_TAG.sub(replace, str(value))
 
 
 def install_plain_menu_labels() -> None:
