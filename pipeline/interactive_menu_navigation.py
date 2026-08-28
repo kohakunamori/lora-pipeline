@@ -157,6 +157,8 @@ def _run_numbered_menu(
     quit_target = "quit" if any(item.value == "quit" for item in items) else None
     root_menu = len(path) == 1 and quit_target is not None
     read_key = key_reader or read_number_menu_key
+    chosen_value: str | None = None
+    chosen_label: str | None = None
 
     with Live(
         _render_numbered_menu(title, items, state, path, escape_target=escape_target, root_menu=root_menu),
@@ -164,7 +166,7 @@ def _run_numbered_menu(
         refresh_per_second=12,
         transient=True,
     ) as live:
-        while True:
+        while chosen_value is None:
             key = read_key()
             result = state.apply(
                 key,
@@ -174,14 +176,13 @@ def _run_numbered_menu(
             )
             if result == "select":
                 selected = items[state.cursor]
-                _record_selected_label(wizard, caller, selected.label)
-                _clear_terminal(wizard.console)
-                return selected.value
+                chosen_value = selected.value
+                chosen_label = selected.label
+                break
             if result is not None:
-                label = next((item.label for item in items if item.value == result), None)
-                _record_selected_label(wizard, caller, label)
-                _clear_terminal(wizard.console)
-                return result
+                chosen_value = result
+                chosen_label = next((item.label for item in items if item.value == result), None)
+                break
             live.update(
                 _render_numbered_menu(
                     title,
@@ -193,6 +194,11 @@ def _run_numbered_menu(
                 ),
                 refresh=True,
             )
+
+    assert chosen_value is not None
+    _record_selected_label(wizard, caller, chosen_label)
+    _clear_terminal(wizard.console)
+    return chosen_value
 
 
 def _menu_path(wizard: Wizard, caller: FrameType, title: str) -> list[str]:
