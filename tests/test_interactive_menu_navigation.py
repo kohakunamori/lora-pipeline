@@ -56,6 +56,14 @@ def test_number_entry_and_arrow_navigation_share_one_state() -> None:
     assert state.cursor == 1
 
 
+def test_zero_is_not_a_valid_menu_number() -> None:
+    state = NumberMenuState(size=3, cursor=1)
+    assert state.apply("digit:0", escape_target="back", quit_target=None, root_menu=False) is None
+    assert state.cursor == 1
+    assert state.typed == ""
+    assert state.message
+
+
 def test_render_places_breadcrumb_above_numbered_table() -> None:
     output = StringIO()
     console = Console(file=output, force_terminal=False, width=120)
