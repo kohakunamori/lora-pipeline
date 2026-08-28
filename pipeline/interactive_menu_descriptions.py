@@ -97,13 +97,20 @@ _COMMON_DESCRIPTIONS: dict[str, tuple[str, str]] = {
 
 
 def _fallback_description(item: MenuItem) -> str:
-    zh = f"进入“{item.label}”对应的操作流程；后续步骤会继续说明具体影响。"
-    en = f"Open “{item.label}” and continue with its guided flow; later steps explain the concrete impact."
+    """Make missing documentation visible instead of inventing semantic meaning."""
+
+    zh = f"⚠ “{item.label}”尚未提供专用说明；当前界面不能可靠解释这个选项的具体含义和影响。"
+    en = f"⚠ “{item.label}” does not yet have dedicated help text; this UI cannot reliably explain its exact meaning or effects."
     return zh if get_language() == "zh-CN" else en
 
 
 def describe_menu_item(item: MenuItem) -> MenuItem:
-    """Return a menu item whose description is guaranteed to be non-empty."""
+    """Return a menu item whose description is guaranteed to be non-empty.
+
+    Explicit descriptions are authoritative. Generic descriptions are only used for
+    well-known navigation/action values. Unknown domain-specific items receive a
+    visible missing-help warning rather than fabricated semantic guidance.
+    """
 
     if item.description.strip():
         return item
