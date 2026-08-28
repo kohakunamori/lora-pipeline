@@ -4,6 +4,7 @@ import sys
 
 from . import interactive_metadata_hooks as _interactive_metadata_hooks  # noqa: F401
 from .i18n import initialize_interactive
+from .interactive_local_video_import import install_local_video_import_modes
 from .interactive_menu_descriptions import install_menu_descriptions
 from .interactive_menu_navigation import install_menu_navigation
 from .interactive_semantic_concepts import InteractiveWizard
@@ -20,6 +21,7 @@ def main() -> None:
     initialize_interactive()
     install_menu_descriptions()
     install_menu_navigation()
+    install_local_video_import_modes(InteractiveWizard)
     InteractiveWizard().home()
 
 
