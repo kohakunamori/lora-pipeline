@@ -186,12 +186,13 @@ def _render_history_html(
         name = checkpoint["name"]
         samples = grouped.get(name, [])
         stage_names = _ordered_stages({str(sample["stage"]) for sample in samples})
+        evidence_html = "yes" if samples else "<strong class='missing'>no sample evidence</strong>"
         coverage_rows.append(
             "<tr>"
             f"<td><code>{html.escape(name)}</code></td>"
             f"<td>{len(samples)}</td>"
             f"<td>{html.escape(', '.join(_stage_label(stage) for stage in stage_names) or '—')}</td>"
-            f"<td>{'yes' if samples else '<strong class=\"missing\">no sample evidence</strong>'}</td>"
+            f"<td>{evidence_html}</td>"
             "</tr>"
         )
         if not samples:
