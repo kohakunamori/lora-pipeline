@@ -5,11 +5,8 @@ from typing import Sequence
 
 from rich.panel import Panel
 
-from . import resource_deletion as _resource_deletion
-from .dataset_metadata_snapshot import attach_dataset_metadata_snapshot
 from .dataset_semantics import (
     add_outfit,
-    attach_dataset_semantics_snapshot,
     character_feature_candidates,
     image_keys_for_outfit,
     load_semantics,
@@ -24,23 +21,8 @@ from .dataset_semantics import (
 from .dataset_workspace import DatasetWorkspace
 from .interactive_bulk_selection import InteractiveWizard as BaseInteractiveWizard
 from .interactive_multiselect import MultiSelectOption, select_many
-from .semantic_runtime import install_semantic_runtime_hooks
+from . import semantic_project_hooks as _semantic_project_hooks  # noqa: F401
 from .wizard import MenuItem
-
-
-_ORIGINAL_CREATE = _resource_deletion._create_project_from_training_config
-
-
-def _create_with_dataset_snapshots(workspace, config, *, project_name, root=None):
-    state = _ORIGINAL_CREATE(workspace, config, project_name=project_name, root=root)
-    state = attach_dataset_metadata_snapshot(state, workspace)
-    return attach_dataset_semantics_snapshot(state, workspace)
-
-
-if not getattr(_resource_deletion._create_project_from_training_config, "_dataset_semantics_wrapped", False):
-    _create_with_dataset_snapshots._dataset_semantics_wrapped = True
-    _resource_deletion._create_project_from_training_config = _create_with_dataset_snapshots
-install_semantic_runtime_hooks()
 
 
 class InteractiveWizard(BaseInteractiveWizard):
