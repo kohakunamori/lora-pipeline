@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from pipeline.interactive_multiselect import (
     MultiSelectOption,
     MultiSelectState,
+    _decode_escape_sequence,
+    _decode_plain_key,
     _render,
     select_many,
 )
@@ -55,3 +58,53 @@ def test_multiselect_render_shows_literal_selected_and_unselected_markers() -> N
     assert "[ ] plain tag" in rendered
     assert "selected 1/2" in rendered
     assert "Selected detail" in rendered
+    assert "HJKL move" in rendered
+
+
+@pytest.mark.parametrize(
+    ("sequence", "expected"),
+    [
+        ("[A", "up"),
+        ("[B", "down"),
+        ("[C", "right"),
+        ("[D", "left"),
+        ("OA", "up"),
+        ("OB", "down"),
+        ("OC", "right"),
+        ("OD", "left"),
+        ("[1;2A", "up"),
+        ("[1;5D", "left"),
+    ],
+)
+def test_decode_escape_sequence_accepts_common_terminal_arrow_forms(
+    sequence: str,
+    expected: str,
+) -> None:
+    assert _decode_escape_sequence(sequence) == expected
+
+
+def test_decode_escape_sequence_rejects_unrelated_sequences() -> None:
+    assert _decode_escape_sequence("") == "unknown"
+    assert _decode_escape_sequence("[H") == "unknown"
+    assert _decode_escape_sequence("[fooA") == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("h", "left"),
+        ("j", "down"),
+        ("k", "up"),
+        ("l", "right"),
+        ("H", "left"),
+        ("J", "down"),
+        ("K", "up"),
+        ("L", "right"),
+        ("a", "all"),
+        ("n", "none"),
+        (" ", "space"),
+        ("\r", "enter"),
+    ],
+)
+def test_decode_plain_key_supports_navigation_fallbacks(value: str, expected: str) -> None:
+    assert _decode_plain_key(value) == expected
