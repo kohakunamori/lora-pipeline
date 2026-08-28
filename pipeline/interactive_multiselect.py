@@ -14,6 +14,23 @@ from rich.text import Text
 from .models import PipelineError
 
 
+_ARROW_KEYS = {
+    "A": "up",
+    "B": "down",
+    "C": "right",
+    "D": "left",
+}
+
+_PLAIN_KEYS = {
+    "a": "all",
+    "n": "none",
+    "h": "left",
+    "j": "down",
+    "k": "up",
+    "l": "right",
+}
+
+
 @dataclass(frozen=True)
 class MultiSelectOption:
     value: str
@@ -73,7 +90,7 @@ def select_many(
     page_size: int = 30,
     key_reader: Callable[[], str] | None = None,
 ) -> list[str]:
-    """Keyboard-first bulk selector: arrows move, Space toggles, Enter confirms."""
+    """Keyboard-first bulk selector: arrows/HJKL move, Space toggles, Enter confirms."""
     if not options:
         return []
     selected_values = set(selected)
@@ -149,7 +166,7 @@ def _render(
         table.add_row(*cells)
     current = options[state.cursor]
     footer = (
-        f"↑↓←→ move · Space select · Enter confirm · A all · N clear\n"
+        f"↑↓←→ / HJKL move · Space select · Enter confirm · A all · N clear\n"
         f"selected {len(state.selected)}/{len(options)} · page {page + 1}/{max(1, (len(options) + page_size - 1) // page_size)}"
     )
     detail = Text(current.detail) if current.detail else None
@@ -157,6 +174,30 @@ def _render(
         Panel(table, title=title),
         Panel(detail or footer, subtitle=footer if detail else None, border_style="dim"),
     )
+
+
+def _decode_plain_key(value: str) -> str:
+    if value in {"\r", "\n"}:
+        return "enter"
+    if value == " ":
+        return "space"
+    return _PLAIN_KEYS.get(value.casefold(), "unknown")
+
+
+def _decode_escape_sequence(sequence: str) -> str:
+    """Decode common ANSI/VT arrow-key forms from bytes following ESC."""
+    if len(sequence) < 2 or sequence[0] not in {"[", "O"}:
+        return "unknown"
+    final = sequence[-1]
+    action = _ARROW_KEYS.get(final)
+    if action is None:
+        return "unknown"
+    body = sequence[1:-1]
+    if sequence[0] == "O":
+        return action if not body else "unknown"
+    if body and not all(char.isdigit() or char == ";" for char in body):
+        return "unknown"
+    return action
 
 
 def read_key() -> str:
@@ -169,18 +210,10 @@ def _read_key_windows() -> str:
     import msvcrt
 
     value = msvcrt.getwch()
-    if value in {"\r", "\n"}:
-        return "enter"
-    if value == " ":
-        return "space"
-    if value.casefold() == "a":
-        return "all"
-    if value.casefold() == "n":
-        return "none"
     if value in {"\x00", "\xe0"}:
         code = msvcrt.getwch()
         return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(code, "unknown")
-    return "unknown"
+    return _decode_plain_key(value)
 
 
 def _read_key_posix() -> str:
@@ -192,23 +225,27 @@ def _read_key_posix() -> str:
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        value = sys.stdin.read(1)
-        if value in {"\r", "\n"}:
-            return "enter"
-        if value == " ":
-            return "space"
-        if value.casefold() == "a":
-            return "all"
-        if value.casefold() == "n":
-            return "none"
-        if value == "\x1b":
-            sequence = ""
-            for _ in range(2):
-                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if not ready:
-                    break
-                sequence += sys.stdin.read(1)
-            return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(sequence, "unknown")
-        return "unknown"
+        # Read directly from the terminal fd. Mixing TextIOWrapper.read() with
+        # select(fd) can strand the rest of an escape sequence in Python's
+        # userspace buffer, making normal arrow keys look like a lone ESC.
+        first = os.read(fd, 1)
+        if not first:
+            return "unknown"
+        if first != b"\x1b":
+            return _decode_plain_key(first.decode("ascii", errors="ignore"))
+
+        sequence = bytearray()
+        for _ in range(16):
+            timeout = 0.20 if not sequence else 0.05
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                break
+            value = os.read(fd, 1)
+            if not value:
+                break
+            sequence.extend(value)
+            if len(sequence) >= 2 and sequence[-1:] in b"ABCD~":
+                break
+        return _decode_escape_sequence(sequence.decode("ascii", errors="ignore"))
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
