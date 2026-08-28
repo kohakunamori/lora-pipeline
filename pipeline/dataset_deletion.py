@@ -17,6 +17,14 @@ def _workspace_root(workspace: DatasetWorkspace) -> Path:
     return datasets_root.parent
 
 
+def _reload_workspace_in_place(workspace: DatasetWorkspace, *, root: Path) -> None:
+    """Refresh a caller-owned workspace from disk without replacing its object identity."""
+
+    fresh = DatasetWorkspace.load(workspace.name, root=root)
+    workspace.path = fresh.path
+    workspace.payload = fresh.payload
+
+
 def delete_dataset_items(workspace: DatasetWorkspace, keys: Sequence[str]) -> dict[str, Any]:
     """Permanently delete selected dataset copies and their caption sidecars.
 
@@ -29,7 +37,7 @@ def delete_dataset_items(workspace: DatasetWorkspace, keys: Sequence[str]) -> di
     root = _workspace_root(workspace)
     with lifecycle_lock(root):
         assert_deletable("dataset", workspace.name, root=root)
-        workspace = DatasetWorkspace.load(workspace.name, root=root)
+        _reload_workspace_in_place(workspace, root=root)
         unique_keys = list(dict.fromkeys(str(key) for key in keys))
         if not unique_keys:
             raise PipelineError("No dataset items were selected for deletion")
@@ -75,7 +83,7 @@ def delete_dataset_source(workspace: DatasetWorkspace, source_id: str) -> dict[s
     root = _workspace_root(workspace)
     with lifecycle_lock(root):
         assert_deletable("dataset", workspace.name, root=root)
-        workspace = DatasetWorkspace.load(workspace.name, root=root)
+        _reload_workspace_in_place(workspace, root=root)
         if source_id not in workspace.sources:
             raise StateError(f"Unknown dataset source: {source_id}")
 
