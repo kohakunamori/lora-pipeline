@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 from typing import Any, Iterable, Mapping, Sequence
 
 from .config import (
@@ -16,14 +19,19 @@ from .config import (
     write_json_atomic,
     write_yaml_atomic,
 )
+from .dataset.character import analyze_identity as analyze_character_identity
 from .dataset.caption_cleaner import normalize_tag, parse_caption
+from .dataset.duplicates import find_duplicates_from_paths
 from .dataset.image_info import discover_images, inspect_image
 from .dataset.tagger import CachedTagger, ImgutilsWdTagger, TaggerBackend
-from .models import PipelineError, StateError
+from .models import PipelineError, StateError, StepStatus
 from .state import ProjectState, utc_now
 
 
 DATASET_SCHEMA_VERSION = 1
+DATASET_CURATION_SCHEMA_VERSION = 1
+DATASET_DUPLICATE_ANALYZER_VERSION = 1
+DATASET_IDENTITY_ANALYZER_VERSION = 1
 _DATASET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
@@ -379,6 +387,148 @@ class DatasetWorkspace:
             )
         return {"excluded": changed, "audit": audit}
 
+    def analyze_duplicates(self, *, phash_distance: int = 6) -> dict[str, Any]:
+        """Analyze exact/perceptual duplicates for the current active image set."""
+
+        if phash_distance < 0:
+            raise PipelineError("pHash distance must be non-negative")
+        items = self.items(include_disabled=False, include_excluded=False)
+        if not items:
+            raise PipelineError("Dataset has no enabled, non-excluded images")
+
+        manifest = find_duplicates_from_paths(
+            ((item.key, item.image) for item in items),
+            phash_distance=phash_distance,
+        )
+        image_set_hash = stable_hash(
+            [
+                {"key": str(record["path"]), "sha256": str(record["sha256"])}
+                for record in manifest["images"]
+            ]
+        )
+        manifest.update(
+            {
+                "dataset": self.name,
+                "generated_at": utc_now(),
+                "image_set_hash": image_set_hash,
+            }
+        )
+        path = self.dataset_dir / "review" / "duplicates" / "manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, manifest)
+        self._record_curation_analysis(
+            "dedup",
+            analyzer_version=DATASET_DUPLICATE_ANALYZER_VERSION,
+            image_set_hash=image_set_hash,
+            parameters={"phash_distance": int(phash_distance)},
+            manifest=path,
+            summary=dict(manifest["summary"]),
+        )
+        return manifest
+
+    def analyze_identity(self, *, min_samples: int = 2) -> dict[str, Any]:
+        """Run CCIP identity analysis for the current active character images."""
+
+        if self.concept_type != "character":
+            raise PipelineError("Identity analysis is only applicable to character datasets")
+        if min_samples < 1:
+            raise PipelineError("Identity min_samples must be at least 1")
+        items = self.items(include_disabled=False, include_excluded=False)
+        if not items:
+            raise PipelineError("Dataset has no enabled, non-excluded images")
+
+        image_set_hash = self._active_image_set_hash(items)
+        result = analyze_character_identity(
+            [item.image for item in items],
+            min_samples=min_samples,
+        )
+        key_by_path = {str(item.image): item.key for item in items}
+        for field in ("main_cluster", "possible_outliers", "possible_mixed_characters"):
+            result[field] = [
+                key_by_path.get(str(path), str(path))
+                for path in result.get(field, [])
+            ]
+        summary = {
+            "main_cluster": len(result.get("main_cluster", [])),
+            "possible_outliers": len(result.get("possible_outliers", [])),
+            "possible_mixed_characters": len(
+                result.get("possible_mixed_characters", [])
+            ),
+        }
+        result.update(
+            {
+                "dataset": self.name,
+                "generated_at": utc_now(),
+                "image_set_hash": image_set_hash,
+                "summary": summary,
+            }
+        )
+        path = self.dataset_dir / "review" / "outliers" / "manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, result)
+        self._record_curation_analysis(
+            "identity",
+            analyzer_version=DATASET_IDENTITY_ANALYZER_VERSION,
+            image_set_hash=image_set_hash,
+            parameters={"min_samples": int(min_samples)},
+            manifest=path,
+            summary=summary,
+        )
+        return result
+
+    def curation_status(
+        self,
+        *,
+        image_set_hash: str | None = None,
+        phash_distance: int = 6,
+        identity_min_samples: int = 2,
+    ) -> dict[str, Any]:
+        """Report whether reusable curation analyses match the active image set."""
+
+        current_hash = image_set_hash or self._active_image_set_hash()
+        payload = self._load_curation_manifest()
+        analyses = dict(payload.get("analyses", {}))
+        expected = {
+            "dedup": {
+                "analyzer_version": DATASET_DUPLICATE_ANALYZER_VERSION,
+                "parameters": {"phash_distance": int(phash_distance)},
+            },
+            "identity": {
+                "analyzer_version": DATASET_IDENTITY_ANALYZER_VERSION,
+                "parameters": {"min_samples": int(identity_min_samples)},
+            },
+        }
+        resolved: dict[str, Any] = {}
+        for name, expectation in expected.items():
+            record = dict(analyses.get(name, {}))
+            applicable = not (name == "identity" and self.concept_type != "character")
+            fresh = bool(
+                applicable
+                and record
+                and int(record.get("analyzer_version", -1))
+                == int(expectation["analyzer_version"])
+                and dict(record.get("parameters", {})) == expectation["parameters"]
+                and str(record.get("image_set_hash") or "") == current_hash
+                and self._curation_manifest_target_exists(record)
+            )
+            resolved[name] = {
+                **record,
+                "applicable": applicable,
+                "fresh": fresh,
+                "expected_analyzer_version": expectation["analyzer_version"],
+                "expected_parameters": expectation["parameters"],
+            }
+        ready = resolved["dedup"]["fresh"] and (
+            self.concept_type != "character" or resolved["identity"]["fresh"]
+        )
+        return {
+            "schema_version": DATASET_CURATION_SCHEMA_VERSION,
+            "dataset": self.name,
+            "image_set_hash": current_hash,
+            "ready": bool(ready),
+            "analyses": resolved,
+        }
+
     def auto_tag(
         self,
         *,
@@ -473,21 +623,79 @@ class DatasetWorkspace:
 
     def snapshot(self) -> dict[str, Any]:
         records: list[dict[str, Any]] = []
+        inspection_records: list[dict[str, Any]] = []
         for item in self.items(include_disabled=False, include_excluded=False):
             caption_sha = None
             if item.caption.is_file():
                 caption_sha = hashlib.sha256(item.caption.read_bytes()).hexdigest()
+            inspected = inspect_image(item.image, self.source_images_dir(item.source_id))
+            inspected["path"] = item.key
+            inspected["caption"] = item.caption.is_file()
+            if inspected.get("corrupt"):
+                raise PipelineError(
+                    f"Dataset contains a corrupt active image: {item.key}. "
+                    "Run Dataset audit and exclude it before creating a Project."
+                )
+            inspection_records.append(inspected)
             records.append(
                 {
                     "key": item.key,
                     "source_id": item.source_id,
                     "relative": item.relative.as_posix(),
-                    "image_sha256": sha256_file(item.image),
+                    "image_sha256": str(inspected["sha256"]),
                     "caption_sha256": caption_sha,
                 }
             )
         if not records:
             raise PipelineError("Dataset has no enabled, non-excluded images")
+
+        widths = [int(record["width"]) for record in inspection_records]
+        heights = [int(record["height"]) for record in inspection_records]
+        megapixels = [float(record["megapixels"]) for record in inspection_records]
+        formats = Counter(
+            str(record.get("format") or "unknown") for record in inspection_records
+        )
+        inspection_manifest = {
+            "schema_version": 1,
+            "root": str(self.dataset_dir),
+            "input_hash": stable_hash(
+                [
+                    {
+                        "path": record["path"],
+                        "bytes": record["bytes"],
+                        "sha256": record["sha256"],
+                    }
+                    for record in inspection_records
+                ]
+            ),
+            "summary": {
+                "image_count": len(inspection_records),
+                "valid_images": len(inspection_records),
+                "corrupt_images": 0,
+                "formats": dict(sorted(formats.items())),
+                "caption_count": sum(
+                    bool(record["caption"]) for record in inspection_records
+                ),
+                "very_small_images": sum(
+                    bool(record.get("very_small")) for record in inspection_records
+                ),
+                "alpha_images": sum(
+                    bool(record.get("alpha")) for record in inspection_records
+                ),
+                "animated_images": sum(
+                    bool(record.get("animated")) for record in inspection_records
+                ),
+                "exif_oriented_images": sum(
+                    record.get("exif_orientation") not in (None, 1)
+                    for record in inspection_records
+                ),
+                "width": _range_summary(widths),
+                "height": _range_summary(heights),
+                "megapixels": _range_summary(megapixels),
+            },
+            "images": inspection_records,
+        }
+        image_set_hash = _image_set_hash_from_snapshot_records(records)
         source_ids = sorted({str(record["source_id"]) for record in records})
         basis = {
             "schema_version": 1,
@@ -503,6 +711,8 @@ class DatasetWorkspace:
                 for source_id in source_ids
             ],
             "images": records,
+            "image_set_hash": image_set_hash,
+            "inspection": inspection_manifest,
         }
         return {
             **basis,
@@ -543,6 +753,84 @@ class DatasetWorkspace:
                 shutil.copy2(item.caption, target.with_suffix(".txt"))
             count += 1
         return count
+
+    def _active_image_set_hash(
+        self,
+        items: Sequence[DatasetItem] | None = None,
+    ) -> str:
+        active = list(
+            items
+            if items is not None
+            else self.items(include_disabled=False, include_excluded=False)
+        )
+        return stable_hash(
+            [
+                {"key": item.key, "sha256": sha256_file(item.image)}
+                for item in active
+            ]
+        )
+
+    def _curation_manifest_path(self) -> Path:
+        return self.dataset_dir / "review" / "curation-manifest.json"
+
+    def _load_curation_manifest(self) -> dict[str, Any]:
+        path = self._curation_manifest_path()
+        if not path.is_file():
+            return {
+                "schema_version": DATASET_CURATION_SCHEMA_VERSION,
+                "dataset": self.name,
+                "analyses": {},
+            }
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StateError(f"Invalid Dataset curation manifest: {path}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise StateError(f"Invalid Dataset curation manifest: {path}")
+        if int(payload.get("schema_version", -1)) != DATASET_CURATION_SCHEMA_VERSION:
+            return {
+                "schema_version": DATASET_CURATION_SCHEMA_VERSION,
+                "dataset": self.name,
+                "analyses": {},
+            }
+        analyses = payload.setdefault("analyses", {})
+        if not isinstance(analyses, dict):
+            raise StateError(f"Invalid Dataset curation analyses: {path}")
+        return payload
+
+    def _record_curation_analysis(
+        self,
+        name: str,
+        *,
+        analyzer_version: int,
+        image_set_hash: str,
+        parameters: Mapping[str, Any],
+        manifest: Path,
+        summary: Mapping[str, Any],
+    ) -> None:
+        payload = self._load_curation_manifest()
+        analyses = payload.setdefault("analyses", {})
+        analyses[name] = {
+            "analyzer_version": int(analyzer_version),
+            "image_set_hash": image_set_hash,
+            "parameters": dict(parameters),
+            "manifest": manifest.relative_to(self.dataset_dir).as_posix(),
+            "summary": dict(summary),
+            "finished_at": utc_now(),
+        }
+        payload["updated_at"] = utc_now()
+        write_json_atomic(self._curation_manifest_path(), payload)
+
+    def _curation_manifest_target_exists(self, record: Mapping[str, Any]) -> bool:
+        relative = str(record.get("manifest") or "").strip()
+        if not relative:
+            return False
+        target = (self.dataset_dir / relative).resolve()
+        try:
+            target.relative_to(self.dataset_dir.resolve())
+        except ValueError:
+            return False
+        return target.is_file()
 
     def _load_exclusions(self) -> dict[str, dict[str, Any]]:
         path = self.dataset_dir / "review" / "exclusions.yaml"
@@ -642,12 +930,84 @@ def create_project_from_dataset(
     project = state.payload["project"]
     project["raw_source"] = str(workspace.dataset_dir)
     project["dataset_snapshot"] = snapshot
+
+    frozen_inspection = dict(snapshot["inspection"])
+    frozen_inspection["root"] = str(state.project_dir / "raw")
+    inspection_path = state.project_dir / "dataset-manifest.json"
+    write_json_atomic(inspection_path, frozen_inspection)
+    state.payload["steps"]["inspect"] = {
+        "status": StepStatus.SKIPPED.value,
+        "attempts": 0,
+        "reason": "reused DatasetWorkspace inspection from frozen dataset snapshot",
+        "permanent": True,
+        "finished_at": utc_now(),
+        "input_hash": str(frozen_inspection["input_hash"]),
+        "output_manifest": str(inspection_path),
+        "details": dict(frozen_inspection["summary"]),
+    }
+
+    curation = workspace.curation_status(
+        image_set_hash=str(snapshot["image_set_hash"]),
+    )
+    project["dataset_curation"] = curation
+    reusable = {
+        "dedup": ("review/duplicates/manifest.json", "dedup"),
+        "identity": ("review/outliers/manifest.json", "identity"),
+    }
+    for analysis_name, (target_relative, step_name) in reusable.items():
+        record = dict(curation["analyses"].get(analysis_name, {}))
+        if not record.get("fresh"):
+            continue
+        source_relative = str(record.get("manifest") or "")
+        if not source_relative:
+            continue
+        source_manifest = workspace.dataset_dir / source_relative
+        target_manifest = state.project_dir / target_relative
+        target_manifest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_manifest, target_manifest)
+        state.payload["steps"][step_name] = {
+            "status": StepStatus.SKIPPED.value,
+            "attempts": 0,
+            "reason": (
+                f"reused fresh DatasetWorkspace {analysis_name} analysis "
+                "from frozen dataset snapshot"
+            ),
+            "permanent": True,
+            "finished_at": utc_now(),
+            "input_hash": str(record["image_set_hash"]),
+            "output_manifest": str(target_manifest),
+            "details": {
+                **dict(record.get("summary", {})),
+                "dataset_curation_reused": True,
+                "analyzer_version": record.get("analyzer_version"),
+                "parameters": dict(record.get("parameters", {})),
+            },
+        }
+
     preferences = dict(project.get("interactive_preferences", {}))
     if snapshot["caption_count"] == snapshot["image_count"]:
         preferences.setdefault("caption_mode", "existing_taglist_clean")
     project["interactive_preferences"] = preferences
     state.save()
     return state
+
+
+def _range_summary(values: list[int] | list[float]) -> dict[str, int | float | None]:
+    if not values:
+        return {"min": None, "median": None, "max": None}
+    return {"min": min(values), "median": median(values), "max": max(values)}
+
+
+def _image_set_hash_from_snapshot_records(records: Sequence[Mapping[str, Any]]) -> str:
+    return stable_hash(
+        [
+            {
+                "key": str(record["key"]),
+                "sha256": str(record["image_sha256"]),
+            }
+            for record in records
+        ]
+    )
 
 
 def parse_number_selection(text: str, *, minimum: int = 1, maximum: int) -> list[int]:

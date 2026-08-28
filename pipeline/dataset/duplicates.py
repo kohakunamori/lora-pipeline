@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from PIL import Image
 
@@ -28,17 +28,36 @@ class _UnionFind:
 
 
 def find_duplicates(raw_dir: Path, *, phash_distance: int = 6) -> dict[str, Any]:
+    return find_duplicates_from_paths(
+        (
+            (path.relative_to(raw_dir).as_posix(), path)
+            for path in discover_images(raw_dir)
+        ),
+        phash_distance=phash_distance,
+    )
+
+
+def find_duplicates_from_paths(
+    items: Iterable[tuple[str, Path]],
+    *,
+    phash_distance: int = 6,
+) -> dict[str, Any]:
+    """Find exact and perceptual duplicates for explicitly keyed image paths."""
+
     try:
         import imagehash
     except ImportError as exc:
         raise OptionalBackendUnavailable("ImageHash is required for perceptual duplicate detection") from exc
 
-    paths = discover_images(raw_dir)
+    entries = sorted(
+        ((str(key), Path(path)) for key, path in items),
+        key=lambda item: item[0].casefold(),
+    )
+    paths = [path for _key, path in entries]
     exact: dict[str, list[str]] = defaultdict(list)
     hashes: list[Any] = []
     records: list[dict[str, Any]] = []
-    for path in paths:
-        relative = path.relative_to(raw_dir).as_posix()
+    for relative, path in entries:
         sha = sha256_file(path)
         exact[sha].append(relative)
         try:

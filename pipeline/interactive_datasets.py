@@ -149,6 +149,14 @@ class InteractiveWizard(BaseInteractiveWizard):
                         self._b("安全排除损坏文件和完全重复副本；其余只标记。", "Safely exclude corrupt/exact duplicates; flag the rest for review."),
                     ),
                     MenuItem(
+                        "curate",
+                        self._b("高级清洗分析", "Advanced curation analysis"),
+                        self._b(
+                            "运行 pHash 近重复分析；人物数据集同时运行 CCIP 身份检查，并记录 freshness。",
+                            "Run pHash near-duplicate analysis; character datasets also run CCIP identity analysis with freshness tracking.",
+                        ),
+                    ),
+                    MenuItem(
                         "tag",
                         self._b("自动打 Tag", "Auto-tag images"),
                         self._b("使用现有 DeepGHS/WD Tagger，已有人工 Tag 默认不覆盖。", "Use the existing WD tagger; manual captions are preserved by default."),
@@ -180,6 +188,8 @@ class InteractiveWizard(BaseInteractiveWizard):
                 self._manage_dataset_sources(workspace.name)
             elif action == "audit":
                 self._audit_dataset(workspace)
+            elif action == "curate":
+                self._curate_dataset(workspace)
             elif action == "tag":
                 self._auto_tag_dataset(workspace)
             elif action == "review":
@@ -479,6 +489,57 @@ class InteractiveWizard(BaseInteractiveWizard):
                 self._b(
                     "[yellow]低分辨率、极端长宽比、动画图片不会自动删除；请进入人工审核决定。[/yellow]",
                     "[yellow]Small/extreme-aspect/animated images are only flagged; use manual review to decide.[/yellow]",
+                )
+            )
+
+    def _curate_dataset(self, workspace: DatasetWorkspace) -> None:
+        duplicates = workspace.analyze_duplicates()
+        identity = None
+        if workspace.concept_type == "character":
+            identity = workspace.analyze_identity()
+        status = workspace.curation_status()
+
+        table = Table(
+            title=self._b("高级清洗分析", "Advanced curation analysis"),
+            show_header=False,
+        )
+        table.add_column(self._b("项目", "Item"), style="bold")
+        table.add_column(self._b("结果", "Result"))
+        duplicate_summary = duplicates["summary"]
+        table.add_row(
+            self._b("完全重复组", "Exact duplicate groups"),
+            str(duplicate_summary["exact_groups"]),
+        )
+        table.add_row(
+            self._b("近重复组", "Perceptual duplicate groups"),
+            str(duplicate_summary["near_groups"]),
+        )
+        if identity is not None:
+            identity_summary = identity["summary"]
+            table.add_row(
+                self._b("CCIP 离群图片", "CCIP outliers"),
+                str(identity_summary["possible_outliers"]),
+            )
+            table.add_row(
+                self._b("可能混入其他人物", "Possible mixed characters"),
+                str(identity_summary["possible_mixed_characters"]),
+            )
+        table.add_row(
+            "Freshness",
+            "[green]READY[/green]" if status["ready"] else "[yellow]INCOMPLETE[/yellow]",
+        )
+        self.console.print(table)
+        self.console.print(
+            self._b(
+                "[dim]分析结果绑定当前 active image set。之后新增、删除、排除、恢复、启停来源或修改图片内容都会自动使对应结果 stale；修改 Tag/caption 不会。[/dim]",
+                "[dim]Results are bound to the current active image set. Adding/removing/excluding/restoring images, toggling sources, or changing image bytes makes them stale; tag/caption edits do not.[/dim]",
+            )
+        )
+        if duplicate_summary["exact_groups"]:
+            self.console.print(
+                self._b(
+                    "[yellow]仍存在完全重复图片。建议先运行 Dataset audit 的安全自动排除，再重新执行高级清洗分析。[/yellow]",
+                    "[yellow]Exact duplicates remain. Run Dataset audit safe exclusions, then rerun advanced curation analysis.[/yellow]",
                 )
             )
 

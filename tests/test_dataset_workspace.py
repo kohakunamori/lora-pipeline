@@ -12,7 +12,7 @@ from pipeline.dataset_workspace import (
     create_project_from_dataset,
     parse_number_selection,
 )
-from pipeline.models import PipelineError
+from pipeline.models import PipelineError, StepStatus
 
 
 class FakeTagger(TaggerBackend):
@@ -190,6 +190,14 @@ def test_project_is_an_immutable_snapshot_of_mutable_dataset(tmp_path) -> None:
     assert snapshot["image_count"] == 1
     assert snapshot["caption_count"] == 1
     assert state.payload["project"]["interactive_preferences"]["caption_mode"] == "existing_taglist_clean"
+    assert state.status("inspect") is StepStatus.SKIPPED
+    assert state.step("inspect")["permanent"] is True
+    inspection_path = state.project_dir / "dataset-manifest.json"
+    assert inspection_path.is_file()
+    inspection = yaml.safe_load(inspection_path.read_text(encoding="utf-8"))
+    assert inspection["summary"]["image_count"] == 1
+    assert inspection["summary"]["corrupt_images"] == 0
+    assert inspection["images"][0]["path"] == "image-directory-001/a.png"
     raw_caption = state.project_dir / "raw" / "image-directory-001" / "a.txt"
     assert raw_caption.read_text(encoding="utf-8").strip() == "portrait, smile"
 
@@ -201,3 +209,141 @@ def test_project_is_an_immutable_snapshot_of_mutable_dataset(tmp_path) -> None:
     assert reloaded.payload["project"]["dataset_snapshot"]["snapshot_hash"] == snapshot["snapshot_hash"]
     assert raw_caption.read_text(encoding="utf-8").strip() == "portrait, smile"
     assert (state.project_dir / "raw" / "image-directory-001" / "a.png").is_file()
+
+
+def test_dataset_project_creation_rejects_corrupt_active_images_at_dataset_boundary(
+    tmp_path,
+) -> None:
+    _base_registry(tmp_path)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "broken.jpg").write_bytes(b"not-an-image")
+
+    workspace = DatasetWorkspace.create("demo", concept_type="character", root=tmp_path)
+    workspace.add_source_from_directory(source, kind="image_directory")
+
+    with pytest.raises(PipelineError, match="corrupt active image"):
+        create_project_from_dataset(
+            workspace,
+            name="train-one",
+            base="base",
+            trigger="zz_demo",
+            strategy="quality",
+            images_seen=1000,
+            root=tmp_path,
+        )
+
+
+def test_dataset_curation_freshness_tracks_only_active_image_set(tmp_path) -> None:
+    source = tmp_path / "source"
+    _image(source / "a.png", "red")
+    _image(source / "b.png", "blue")
+    workspace = DatasetWorkspace.create("demo", concept_type="style", root=tmp_path)
+    workspace.add_source_from_directory(source, kind="image_directory")
+
+    workspace.analyze_duplicates()
+    fresh = workspace.curation_status()
+    assert fresh["analyses"]["dedup"]["fresh"] is True
+
+    item = workspace.items()[0]
+    workspace.replace_caption(item.key, "portrait, outdoors")
+    assert workspace.curation_status()["analyses"]["dedup"]["fresh"] is True
+
+    workspace.exclude([item.key], reason="test freshness")
+    stale = workspace.curation_status()
+    assert stale["analyses"]["dedup"]["fresh"] is False
+
+
+def test_dataset_project_reuses_fresh_duplicate_analysis(tmp_path) -> None:
+    _base_registry(tmp_path)
+    source = tmp_path / "source"
+    _image(source / "a.png", "red")
+    _image(source / "b.png", "blue")
+    workspace = DatasetWorkspace.create("demo", concept_type="style", root=tmp_path)
+    workspace.add_source_from_directory(source, kind="image_directory")
+    workspace.analyze_duplicates()
+
+    state = create_project_from_dataset(
+        workspace,
+        name="train-style",
+        base="base",
+        trigger="zz_style",
+        strategy="quality",
+        images_seen=1000,
+        root=tmp_path,
+    )
+
+    assert state.status("dedup") is StepStatus.SKIPPED
+    assert state.step("dedup")["permanent"] is True
+    assert state.step("dedup")["details"]["dataset_curation_reused"] is True
+    assert (state.project_dir / "review" / "duplicates" / "manifest.json").is_file()
+
+
+def test_dataset_project_does_not_reuse_stale_duplicate_analysis(tmp_path) -> None:
+    _base_registry(tmp_path)
+    source = tmp_path / "source"
+    _image(source / "a.png", "red")
+    _image(source / "b.png", "blue")
+    workspace = DatasetWorkspace.create("demo", concept_type="style", root=tmp_path)
+    workspace.add_source_from_directory(source, kind="image_directory")
+    workspace.analyze_duplicates()
+    workspace.exclude([workspace.items()[0].key], reason="make analysis stale")
+
+    state = create_project_from_dataset(
+        workspace,
+        name="train-stale",
+        base="base",
+        trigger="zz_style",
+        strategy="quality",
+        images_seen=1000,
+        root=tmp_path,
+    )
+
+    assert state.status("dedup") is StepStatus.PENDING
+    assert state.payload["project"]["dataset_curation"]["analyses"]["dedup"]["fresh"] is False
+
+
+def test_dataset_project_reuses_fresh_character_identity_analysis(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _base_registry(tmp_path)
+    source = tmp_path / "source"
+    _image(source / "a.png", "red")
+    _image(source / "b.png", "blue")
+    workspace = DatasetWorkspace.create("demo", concept_type="character", root=tmp_path)
+    workspace.add_source_from_directory(source, kind="image_directory")
+
+    def fake_identity(paths, *, min_samples):
+        assert min_samples == 2
+        paths = list(paths)
+        return {
+            "method": "ccip",
+            "labels": [0 for _ in paths],
+            "clusters": {0: len(paths)},
+            "main_cluster": [str(path) for path in paths],
+            "possible_outliers": [],
+            "possible_mixed_characters": [],
+        }
+
+    monkeypatch.setattr(
+        "pipeline.dataset_workspace.analyze_character_identity",
+        fake_identity,
+    )
+    workspace.analyze_duplicates()
+    workspace.analyze_identity()
+
+    state = create_project_from_dataset(
+        workspace,
+        name="train-character",
+        base="base",
+        trigger="zz_character",
+        strategy="quality",
+        images_seen=1000,
+        root=tmp_path,
+    )
+
+    assert state.status("identity") is StepStatus.SKIPPED
+    assert state.step("identity")["permanent"] is True
+    assert state.step("identity")["details"]["dataset_curation_reused"] is True
+    assert (state.project_dir / "review" / "outliers" / "manifest.json").is_file()

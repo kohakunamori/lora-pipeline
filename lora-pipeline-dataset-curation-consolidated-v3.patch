@@ -1,25 +1,20 @@
 diff --git a/pipeline/dataset/duplicates.py b/pipeline/dataset/duplicates.py
 --- a/pipeline/dataset/duplicates.py
 +++ b/pipeline/dataset/duplicates.py
-@@ -2,7 +2,7 @@ from __future__ import annotations
-
+@@ -2,6 +2,6 @@
+ 
  from collections import defaultdict
  from pathlib import Path
 -from typing import Any
 +from typing import Any, Iterable
-
+ 
  from PIL import Image
-
-@@ -28,10 +28,24 @@ class _UnionFind:
-             self.parent[right_root] = left_root
-
-
+@@ -29,15 +29,34 @@ def find_duplicates
  def find_duplicates(raw_dir: Path, *, phash_distance: int = 6) -> dict[str, Any]:
-+    paths = discover_images(raw_dir)
 +    return find_duplicates_from_paths(
 +        (
 +            (path.relative_to(raw_dir).as_posix(), path)
-+            for path in paths
++            for path in discover_images(raw_dir)
 +        ),
 +        phash_distance=phash_distance,
 +    )
@@ -36,13 +31,12 @@ diff --git a/pipeline/dataset/duplicates.py b/pipeline/dataset/duplicates.py
          import imagehash
      except ImportError as exc:
          raise OptionalBackendUnavailable("ImageHash is required for perceptual duplicate detection") from exc
-
+ 
 -    paths = discover_images(raw_dir)
 +    entries = sorted(
 +        ((str(key), Path(path)) for key, path in items),
 +        key=lambda item: item[0].casefold(),
 +    )
-+    keys = [key for key, _path in entries]
 +    paths = [path for _key, path in entries]
      exact: dict[str, list[str]] = defaultdict(list)
      hashes: list[Any] = []
@@ -53,26 +47,25 @@ diff --git a/pipeline/dataset/duplicates.py b/pipeline/dataset/duplicates.py
          sha = sha256_file(path)
          exact[sha].append(relative)
          try:
-@@ -65,7 +79,7 @@ def find_duplicates(raw_dir: Path, *, phash_distance: int = 6) -> dict[str, Any]:
-     near: dict[int, list[str]] = defaultdict(list)
-     for index, record in enumerate(records):
-         near[union.find(index)].append(record["path"])
-+
-     exact_groups = [files for files in exact.values() if len(files) > 1]
-     near_groups = [files for files in near.values() if len(files) > 1]
-     return {
 diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 --- a/pipeline/dataset_workspace.py
 +++ b/pipeline/dataset_workspace.py
-@@ -1,6 +1,7 @@
+@@ -1,11 +1,14 @@
  from __future__ import annotations
-
+ 
  import hashlib
 +import json
  import re
  import shutil
  import tempfile
-@@ -18,12 +19,18 @@ from .config import (
++from collections import Counter
+ from dataclasses import dataclass
+ from pathlib import Path
++from statistics import median
+ from typing import Any, Iterable, Mapping, Sequence
+ 
+ from .config import (
+@@ -16,12 +19,17 @@
      write_json_atomic,
      write_yaml_atomic,
  )
@@ -81,30 +74,26 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +from .dataset.duplicates import find_duplicates_from_paths
  from .dataset.image_info import discover_images, inspect_image
  from .dataset.tagger import CachedTagger, ImgutilsWdTagger, TaggerBackend
- from .models import PipelineError, StateError, StepStatus
+-from .models import PipelineError, StateError
++from .models import PipelineError, StateError, StepStatus
  from .state import ProjectState, utc_now
-
-
+ 
+ 
  DATASET_SCHEMA_VERSION = 1
 +DATASET_CURATION_SCHEMA_VERSION = 1
 +DATASET_DUPLICATE_ANALYZER_VERSION = 1
 +DATASET_IDENTITY_ANALYZER_VERSION = 1
  _DATASET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-
-
-@@ -249,6 +256,161 @@ class DatasetWorkspace:
+@@ -246,5 +246,147 @@ class DatasetWorkspace
              )
          return {"excluded": changed, "audit": audit}
-
+ 
 +    def analyze_duplicates(self, *, phash_distance: int = 6) -> dict[str, Any]:
-+        """Run content/perceptual duplicate analysis on the current active image set."""
++        """Analyze exact/perceptual duplicates for the current active image set."""
 +
 +        if phash_distance < 0:
 +            raise PipelineError("pHash distance must be non-negative")
-+        items = self.items(
-+            include_disabled=False,
-+            include_excluded=False,
-+        )
++        items = self.items(include_disabled=False, include_excluded=False)
 +        if not items:
 +            raise PipelineError("Dataset has no enabled, non-excluded images")
 +
@@ -114,10 +103,7 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +        )
 +        image_set_hash = stable_hash(
 +            [
-+                {
-+                    "key": str(record["path"]),
-+                    "sha256": str(record["sha256"]),
-+                }
++                {"key": str(record["path"]), "sha256": str(record["sha256"])}
 +                for record in manifest["images"]
 +            ]
 +        )
@@ -142,16 +128,13 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +        return manifest
 +
 +    def analyze_identity(self, *, min_samples: int = 2) -> dict[str, Any]:
-+        """Run CCIP identity analysis on the current active character image set."""
++        """Run CCIP identity analysis for the current active character images."""
 +
 +        if self.concept_type != "character":
 +            raise PipelineError("Identity analysis is only applicable to character datasets")
 +        if min_samples < 1:
 +            raise PipelineError("Identity min_samples must be at least 1")
-+        items = self.items(
-+            include_disabled=False,
-+            include_excluded=False,
-+        )
++        items = self.items(include_disabled=False, include_excluded=False)
 +        if not items:
 +            raise PipelineError("Dataset has no enabled, non-excluded images")
 +
@@ -201,7 +184,7 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +        phash_distance: int = 6,
 +        identity_min_samples: int = 2,
 +    ) -> dict[str, Any]:
-+        """Report whether reusable Dataset curation analyses match the active images."""
++        """Report whether reusable curation analyses match the active image set."""
 +
 +        current_hash = image_set_hash or self._active_image_set_hash()
 +        payload = self._load_curation_manifest()
@@ -249,25 +232,98 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +
      def auto_tag(
          self,
-         *,
-@@ -382,6 +544,7 @@ class DatasetWorkspace:
+@@ -343,20 +495,78 @@ class DatasetWorkspace
+     def snapshot(self) -> dict[str, Any]:
+         records: list[dict[str, Any]] = []
++        inspection_records: list[dict[str, Any]] = []
+         for item in self.items(include_disabled=False, include_excluded=False):
+             caption_sha = None
+             if item.caption.is_file():
+                 caption_sha = hashlib.sha256(item.caption.read_bytes()).hexdigest()
++            inspected = inspect_image(item.image, self.source_images_dir(item.source_id))
++            inspected["path"] = item.key
++            inspected["caption"] = item.caption.is_file()
++            if inspected.get("corrupt"):
++                raise PipelineError(
++                    f"Dataset contains a corrupt active image: {item.key}. "
++                    "Run Dataset audit and exclude it before creating a Project."
++                )
++            inspection_records.append(inspected)
+             records.append(
+                 {
+                     "key": item.key,
+                     "source_id": item.source_id,
+                     "relative": item.relative.as_posix(),
+-                    "image_sha256": sha256_file(item.image),
++                    "image_sha256": str(inspected["sha256"]),
+                     "caption_sha256": caption_sha,
+                 }
+             )
          if not records:
              raise PipelineError("Dataset has no enabled, non-excluded images")
++
++        widths = [int(record["width"]) for record in inspection_records]
++        heights = [int(record["height"]) for record in inspection_records]
++        megapixels = [float(record["megapixels"]) for record in inspection_records]
++        formats = Counter(
++            str(record.get("format") or "unknown") for record in inspection_records
++        )
++        inspection_manifest = {
++            "schema_version": 1,
++            "root": str(self.dataset_dir),
++            "input_hash": stable_hash(
++                [
++                    {
++                        "path": record["path"],
++                        "bytes": record["bytes"],
++                        "sha256": record["sha256"],
++                    }
++                    for record in inspection_records
++                ]
++            ),
++            "summary": {
++                "image_count": len(inspection_records),
++                "valid_images": len(inspection_records),
++                "corrupt_images": 0,
++                "formats": dict(sorted(formats.items())),
++                "caption_count": sum(
++                    bool(record["caption"]) for record in inspection_records
++                ),
++                "very_small_images": sum(
++                    bool(record.get("very_small")) for record in inspection_records
++                ),
++                "alpha_images": sum(
++                    bool(record.get("alpha")) for record in inspection_records
++                ),
++                "animated_images": sum(
++                    bool(record.get("animated")) for record in inspection_records
++                ),
++                "exif_oriented_images": sum(
++                    record.get("exif_orientation") not in (None, 1)
++                    for record in inspection_records
++                ),
++                "width": _range_summary(widths),
++                "height": _range_summary(heights),
++                "megapixels": _range_summary(megapixels),
++            },
++            "images": inspection_records,
++        }
 +        image_set_hash = _image_set_hash_from_snapshot_records(records)
          source_ids = sorted({str(record["source_id"]) for record in records})
          basis = {
              "schema_version": 1,
-@@ -399,6 +562,7 @@ class DatasetWorkspace:
+@@ -372,6 +582,8 @@ class DatasetWorkspace
                  for source_id in source_ids
              ],
              "images": records,
 +            "image_set_hash": image_set_hash,
-             "inspection": inspection_manifest,
++            "inspection": inspection_manifest,
          }
          return {
-@@ -449,6 +613,80 @@ class DatasetWorkspace:
+             **basis,
+@@ -449,4 +655,82 @@ class DatasetWorkspace
          return count
-
++
 +    def _active_image_set_hash(
 +        self,
 +        items: Sequence[DatasetItem] | None = None,
@@ -277,14 +333,12 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +            if items is not None
 +            else self.items(include_disabled=False, include_excluded=False)
 +        )
-+        basis = [
-+            {
-+                "key": item.key,
-+                "sha256": sha256_file(item.image),
-+            }
-+            for item in active
-+        ]
-+        return stable_hash(basis)
++        return stable_hash(
++            [
++                {"key": item.key, "sha256": sha256_file(item.image)}
++                for item in active
++            ]
++        )
 +
 +    def _curation_manifest_path(self) -> Path:
 +        return self.dataset_dir / "review" / "curation-manifest.json"
@@ -347,13 +401,29 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +        except ValueError:
 +            return False
 +        return target.is_file()
-+
+ 
      def _load_exclusions(self) -> dict[str, dict[str, Any]]:
          path = self.dataset_dir / "review" / "exclusions.yaml"
-         if not path.is_file():
-@@ -506,6 +744,40 @@ def create_project_from_dataset(
-         "details": dict(frozen_inspection["summary"]),
-     }
+@@ -466,6 +748,60 @@ def create_project_from_dataset
+     project = state.payload["project"]
+     project["raw_source"] = str(workspace.dataset_dir)
+     project["dataset_snapshot"] = snapshot
++
++    frozen_inspection = dict(snapshot["inspection"])
++    frozen_inspection["root"] = str(state.project_dir / "raw")
++    inspection_path = state.project_dir / "dataset-manifest.json"
++    write_json_atomic(inspection_path, frozen_inspection)
++    state.payload["steps"]["inspect"] = {
++        "status": StepStatus.SKIPPED.value,
++        "attempts": 0,
++        "reason": "reused DatasetWorkspace inspection from frozen dataset snapshot",
++        "permanent": True,
++        "finished_at": utc_now(),
++        "input_hash": str(frozen_inspection["input_hash"]),
++        "output_manifest": str(inspection_path),
++        "details": dict(frozen_inspection["summary"]),
++    }
++
 +    curation = workspace.curation_status(
 +        image_set_hash=str(snapshot["image_set_hash"]),
 +    )
@@ -391,13 +461,17 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +                "parameters": dict(record.get("parameters", {})),
 +            },
 +        }
++
      preferences = dict(project.get("interactive_preferences", {}))
      if snapshot["caption_count"] == snapshot["image_count"]:
          preferences.setdefault("caption_mode", "existing_taglist_clean")
-@@ -539,6 +811,18 @@ def _range_summary(values: list[int] | list[float]) -> dict[str, int | float | None]:
-     return {"min": min(values), "median": median(values), "max": max(values)}
-
-
+@@ -477,2 +818,20 @@
++def _range_summary(values: list[int] | list[float]) -> dict[str, int | float | None]:
++    if not values:
++        return {"min": None, "median": None, "max": None}
++    return {"min": min(values), "median": median(values), "max": max(values)}
++
++
 +def _image_set_hash_from_snapshot_records(records: Sequence[Mapping[str, Any]]) -> str:
 +    return stable_hash(
 +        [
@@ -412,23 +486,13 @@ diff --git a/pipeline/dataset_workspace.py b/pipeline/dataset_workspace.py
 +
  def parse_number_selection(text: str, *, minimum: int = 1, maximum: int) -> list[int]:
      """Parse compact interactive selections such as ``1,3-5,9``."""
-
 diff --git a/pipeline/interactive_datasets.py b/pipeline/interactive_datasets.py
 --- a/pipeline/interactive_datasets.py
 +++ b/pipeline/interactive_datasets.py
-@@ -13,7 +13,7 @@ from .dataset_workspace import (
-     list_datasets,
-     parse_number_selection,
- )
--from .models import PipelineError, StateError
-+from .models import PipelineError, StateError
- from .service import load_project
- from .video_source import is_url
- from .wizard import MenuItem, STRATEGIES
-@@ -129,6 +129,15 @@ class InteractiveWizard(BaseInteractiveWizard):
+@@ -149,5 +149,13 @@ class InteractiveWizard
                          self._b("安全排除损坏文件和完全重复副本；其余只标记。", "Safely exclude corrupt/exact duplicates; flag the rest for review."),
                      ),
-+                    MenuItem(
+                     MenuItem(
 +                        "curate",
 +                        self._b("高级清洗分析", "Advanced curation analysis"),
 +                        self._b(
@@ -436,25 +500,19 @@ diff --git a/pipeline/interactive_datasets.py b/pipeline/interactive_datasets.py
 +                            "Run pHash near-duplicate analysis; character datasets also run CCIP identity analysis with freshness tracking.",
 +                        ),
 +                    ),
-                     MenuItem(
++                    MenuItem(
                          "tag",
                          self._b("自动打 Tag", "Auto-tag images"),
-@@ -160,6 +169,8 @@ class InteractiveWizard(BaseInteractiveWizard):
-                 self._import_dataset_source(workspace)
-             elif action == "sources":
-                 self._manage_dataset_sources(workspace.name)
+@@ -181,4 +190,6 @@ class InteractiveWizard
              elif action == "audit":
                  self._audit_dataset(workspace)
 +            elif action == "curate":
 +                self._curate_dataset(workspace)
              elif action == "tag":
                  self._auto_tag_dataset(workspace)
-             elif action == "review":
-@@ -421,6 +432,55 @@ class InteractiveWizard(BaseInteractiveWizard):
-                     "Small/extreme-aspect/animated images are only flagged; use manual review to decide.[/yellow]",
-                 )
-             )
-
+@@ -481,3 +492,54 @@ class InteractiveWizard
++            )
++
 +    def _curate_dataset(self, workspace: DatasetWorkspace) -> None:
 +        duplicates = workspace.analyze_duplicates()
 +        identity = None
@@ -462,7 +520,10 @@ diff --git a/pipeline/interactive_datasets.py b/pipeline/interactive_datasets.py
 +            identity = workspace.analyze_identity()
 +        status = workspace.curation_status()
 +
-+        table = Table(title=self._b("高级清洗分析", "Advanced curation analysis"), show_header=False)
++        table = Table(
++            title=self._b("高级清洗分析", "Advanced curation analysis"),
++            show_header=False,
++        )
 +        table.add_column(self._b("项目", "Item"), style="bold")
 +        table.add_column(self._b("结果", "Result"))
 +        duplicate_summary = duplicates["summary"]
@@ -501,18 +562,63 @@ diff --git a/pipeline/interactive_datasets.py b/pipeline/interactive_datasets.py
 +                    "[yellow]仍存在完全重复图片。建议先运行 Dataset audit 的安全自动排除，再重新执行高级清洗分析。[/yellow]",
 +                    "[yellow]Exact duplicates remain. Run Dataset audit safe exclusions, then rerun advanced curation analysis.[/yellow]",
 +                )
-+            )
-+
+             )
+ 
      def _auto_tag_dataset(self, workspace: DatasetWorkspace, *, source_id: str | None = None) -> None:
-         threshold = self._ask_positive_float(self._b("Tag 阈值", "Tag threshold"), default=0.35)
-         if threshold > 1.0:
 diff --git a/tests/test_dataset_workspace.py b/tests/test_dataset_workspace.py
 --- a/tests/test_dataset_workspace.py
 +++ b/tests/test_dataset_workspace.py
-@@ -174,6 +174,100 @@ def test_project_is_an_immutable_snapshot_of_mutable_dataset(tmp_path) -> None:
+@@ -12,7 +12,7 @@
+     create_project_from_dataset,
+     parse_number_selection,
+ )
+-from pipeline.models import PipelineError
++from pipeline.models import PipelineError, StepStatus
+ 
+ 
+ class FakeTagger(TaggerBackend):
+@@ -149,4 +149,12 @@ test_project_is_an_immutable_snapshot_of_mutable_dataset
+     assert snapshot["image_count"] == 1
+     assert snapshot["caption_count"] == 1
+     assert state.payload["project"]["interactive_preferences"]["caption_mode"] == "existing_taglist_clean"
++    assert state.status("inspect") is StepStatus.SKIPPED
++    assert state.step("inspect")["permanent"] is True
++    inspection_path = state.project_dir / "dataset-manifest.json"
++    assert inspection_path.is_file()
++    inspection = yaml.safe_load(inspection_path.read_text(encoding="utf-8"))
++    assert inspection["summary"]["image_count"] == 1
++    assert inspection["summary"]["corrupt_images"] == 0
++    assert inspection["images"][0]["path"] == "image-directory-001/a.png"
+     raw_caption = state.project_dir / "raw" / "image-directory-001" / "a.txt"
+@@ -162,3 +169,141 @@ test_project_is_an_immutable_snapshot_of_mutable_dataset
+     assert reloaded.payload["project"]["dataset_snapshot"]["snapshot_hash"] == snapshot["snapshot_hash"]
+     assert raw_caption.read_text(encoding="utf-8").strip() == "portrait, smile"
      assert (state.project_dir / "raw" / "image-directory-001" / "a.png").is_file()
-
-
++
++
++def test_dataset_project_creation_rejects_corrupt_active_images_at_dataset_boundary(
++    tmp_path,
++) -> None:
++    _base_registry(tmp_path)
++    source = tmp_path / "source"
++    source.mkdir()
++    (source / "broken.jpg").write_bytes(b"not-an-image")
++
++    workspace = DatasetWorkspace.create("demo", concept_type="character", root=tmp_path)
++    workspace.add_source_from_directory(source, kind="image_directory")
++
++    with pytest.raises(PipelineError, match="corrupt active image"):
++        create_project_from_dataset(
++            workspace,
++            name="train-one",
++            base="base",
++            trigger="zz_demo",
++            strategy="quality",
++            images_seen=1000,
++            root=tmp_path,
++        )
++
++
 +def test_dataset_curation_freshness_tracks_only_active_image_set(tmp_path) -> None:
 +    source = tmp_path / "source"
 +    _image(source / "a.png", "red")
@@ -626,8 +732,3 @@ diff --git a/tests/test_dataset_workspace.py b/tests/test_dataset_workspace.py
 +    assert state.step("identity")["permanent"] is True
 +    assert state.step("identity")["details"]["dataset_curation_reused"] is True
 +    assert (state.project_dir / "review" / "outliers" / "manifest.json").is_file()
-+
-+
- def test_dataset_project_creation_rejects_corrupt_active_images_at_dataset_boundary(
-     tmp_path,
- ) -> None:
