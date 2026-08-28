@@ -105,6 +105,32 @@ def test_numbered_menu_returns_selected_item_with_fake_key_reader() -> None:
     assert selected == "second"
 
 
+def test_numbered_menu_does_not_redraw_whole_table_on_navigation() -> None:
+    output = StringIO()
+    keys = iter(["down", "enter"])
+    wizard = Wizard(console=Console(file=output, force_terminal=False, width=100))
+
+    selected = _run_numbered_menu(
+        wizard,
+        "Stable menu",
+        [
+            MenuItem("first", "First", "Unique first description"),
+            MenuItem("second", "Second", "Unique second description"),
+            MenuItem("back", "Back", "Unique back description"),
+        ],
+        default="first",
+        key_reader=lambda: next(keys),
+    )
+
+    assert selected == "second"
+    rendered = output.getvalue()
+    # The table is static for the lifetime of one menu invocation. Only the final
+    # one-line "Current" prompt is rewritten while arrows/numbers change state.
+    assert rendered.count("Unique first description") == 1
+    assert rendered.count("Unique second description") == 1
+    assert rendered.count("Unique back description") == 1
+
+
 def test_plain_menu_key_decoder_supports_numbers_escape_and_backspace() -> None:
     assert _decode_number_plain_key("7") == "digit:7"
     assert _decode_number_plain_key("\r") == "enter"
