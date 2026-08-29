@@ -40,6 +40,9 @@ class FinalHandler(SecureHandler):
             raise PipelineError("Unknown source action")
 
         source = workspace.sources[source_id]
+        if bool(source.get("enabled", True)):
+            raise PipelineError("请先停用这个来源，再执行永久删除")
+
         items = workspace.items(
             source_id=source_id,
             include_disabled=True,
