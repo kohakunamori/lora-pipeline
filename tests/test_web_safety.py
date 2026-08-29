@@ -28,7 +28,7 @@ def _request(server, method: str, path: str, body: str | None = None):
     return response.status, headers_out, data
 
 
-def test_source_delete_requires_typed_source_id(tmp_path: Path) -> None:
+def test_source_delete_requires_disabled_source_and_typed_source_id(tmp_path: Path) -> None:
     incoming = tmp_path / "incoming"
     incoming.mkdir()
     Image.new("RGB", (48, 48), "white").save(incoming / "one.png")
@@ -44,6 +44,15 @@ def test_source_delete_requires_typed_source_id(tmp_path: Path) -> None:
         request_delete = urlencode(
             {"_csrf": csrf, "source_id": source_id, "action": "delete"}
         )
+
+        status, _, data = _request(server, "POST", "/datasets/demo/source-action", request_delete)
+        assert status == 400
+        assert "先停用".encode("utf-8") in data
+        assert source_id in DatasetWorkspace.load("demo", root=tmp_path).sources
+
+        workspace = DatasetWorkspace.load("demo", root=tmp_path)
+        workspace.set_source_enabled(source_id, False)
+
         status, _, data = _request(server, "POST", "/datasets/demo/source-action", request_delete)
         assert status == 200
         assert source_id.encode() in data

@@ -78,7 +78,7 @@ def delete_dataset_items(workspace: DatasetWorkspace, keys: Sequence[str]) -> di
 
 
 def delete_dataset_source(workspace: DatasetWorkspace, source_id: str) -> dict[str, Any]:
-    """Permanently remove one imported/derived source from a Dataset workspace."""
+    """Permanently remove one disabled imported/derived source from a Dataset workspace."""
 
     root = _workspace_root(workspace)
     with lifecycle_lock(root):
@@ -88,6 +88,9 @@ def delete_dataset_source(workspace: DatasetWorkspace, source_id: str) -> dict[s
             raise StateError(f"Unknown dataset source: {source_id}")
 
         source = dict(workspace.sources[source_id])
+        if bool(source.get("enabled", True)):
+            raise StateError(f"Dataset source must be disabled before deletion: {source_id}")
+
         items = workspace.items(
             source_id=source_id,
             include_disabled=True,
