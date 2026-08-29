@@ -101,6 +101,23 @@ def test_source_delete_requires_typed_confirmation(tmp_path: Path) -> None:
                 "action": "delete",
             },
         )
+        assert status == 400
+        assert "先停用".encode("utf-8") in data
+        assert source_id in DatasetWorkspace.load("demo", root=tmp_path).sources
+
+        workspace = DatasetWorkspace.load("demo", root=tmp_path)
+        workspace.set_source_enabled(source_id, False)
+
+        status, _, data = _request(
+            server,
+            "POST",
+            "/datasets/demo/source-action",
+            form={
+                "_csrf": csrf,
+                "source_id": source_id,
+                "action": "delete",
+            },
+        )
         assert status == 200
         assert source_id.encode() in data
         assert source_id in DatasetWorkspace.load("demo", root=tmp_path).sources
