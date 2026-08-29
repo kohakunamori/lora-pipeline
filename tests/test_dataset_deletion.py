@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from pipeline.dataset_deletion import (
@@ -10,6 +11,7 @@ from pipeline.dataset_deletion import (
     delete_dataset_workspace,
 )
 from pipeline.dataset_workspace import DatasetWorkspace
+from pipeline.models import StateError
 
 
 def _image(path: Path, value: int) -> None:
@@ -49,6 +51,24 @@ def test_delete_selected_items_removes_image_caption_and_exclusion(tmp_path) -> 
     assert [item.relative.name for item in remaining] == ["001.png", "003.png"]
 
 
+def test_delete_source_rejects_enabled_source_without_mutation(tmp_path) -> None:
+    workspace = DatasetWorkspace.create("demo", root=tmp_path)
+    record = workspace.add_source_from_directory(
+        _source_dir(tmp_path, "input", [20, 80]),
+        kind="image_directory",
+        label="active",
+    )
+    source_id = str(record["id"])
+    source_dir = workspace.source_dir(source_id)
+
+    with pytest.raises(StateError, match="must be disabled before deletion"):
+        delete_dataset_source(workspace, source_id)
+
+    assert source_dir.is_dir()
+    assert source_id in workspace.sources
+    assert len(workspace.items(source_id=source_id)) == 2
+
+
 def test_delete_source_removes_only_that_source_and_keeps_derived_or_other_sources(tmp_path) -> None:
     workspace = DatasetWorkspace.create("demo", root=tmp_path)
     first = workspace.add_source_from_directory(
@@ -66,6 +86,7 @@ def test_delete_source_removes_only_that_source_and_keeps_derived_or_other_sourc
     second_id = str(second["id"])
     first_dir = workspace.source_dir(first_id)
     workspace.exclude([workspace.items(source_id=first_id)[0].key], reason="test")
+    workspace.set_source_enabled(first_id, False)
 
     result = delete_dataset_source(workspace, first_id)
 
