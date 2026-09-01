@@ -30,6 +30,7 @@ class _Workspace:
         self._captions = {
             "1.png": "1girl, purple hair, purple eyes, white bikini, frilled bikini, smile",
             "2.png": "1girl, purple hair, purple eyes, white bikini, frilled bikini, beach",
+            "3.png": "1girl, purple hair, purple eyes, white bikini, frilled bikini, standing",
         }
 
     def items(self, **_kwargs):
@@ -136,6 +137,10 @@ def test_outfit_runtime_suppresses_manual_and_invariant_garment_tags(tmp_path: P
                 "2.png",
                 "misuzu_demo, misuzu_demo_default, 1girl, purple hair, purple eyes, white bikini, frilled bikini, beach",
             ),
+            (
+                "3.png",
+                "misuzu_demo, misuzu_demo_default, 1girl, purple hair, purple eyes, white bikini, frilled bikini, standing",
+            ),
         ],
     )
     result = StepResult(
@@ -175,7 +180,6 @@ def test_outfit_runtime_blocks_mixed_semantic_outfits(tmp_path: Path) -> None:
 
     state = _State(tmp_path)
     attach_target_aware_dataset_semantics_snapshot(state, workspace)
-    # Replace the frozen snapshot for this focused runtime validation.
     state.payload["project"]["dataset_semantics_snapshot"] = {
         **state.payload["project"]["dataset_semantics_snapshot"],
         "outfits": semantics["outfits"],
