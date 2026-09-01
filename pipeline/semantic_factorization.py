@@ -4,7 +4,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from .config import stable_hash, write_json_atomic
 from .dataset.caption_cleaner import CATEGORY_PATTERNS, normalize_tag, parse_caption
@@ -36,13 +36,6 @@ _IDENTITY_PATTERNS = (
 
 
 def apply_character_semantic_factorization(state, result: StepResult) -> StepResult:
-    """Move stable identity/outfit descriptors from captions into semantic tokens.
-
-    This runs after the existing Character semantic composer has injected the frozen
-    character and per-image outfit tokens. It only removes high-confidence intrinsic
-    identity tags plus manually selected or strongly outfit-specific garment tags.
-    """
-
     project = state.payload.get("project", {})
     snapshot = project.get("dataset_semantics_snapshot")
     if not snapshot or project.get("type") != "character":
@@ -67,6 +60,15 @@ def apply_character_semantic_factorization(state, result: StepResult) -> StepRes
     manual_character_features = {normalize_tag(tag) for tag in character.get("features", [])}
     inferred_identity = infer_invariant_identity_tags(records) - manual_character_features
     inferred_outfits = infer_outfit_features_by_group(records, bindings)
+    manual_outfits = {
+        str(outfit_id): {normalize_tag(tag) for tag in outfit.get("features", [])}
+        for outfit_id, outfit in outfits.items()
+        if isinstance(outfit, Mapping)
+    }
+    inferred_outfits = {
+        outfit_id: tags - manual_outfits.get(outfit_id, set())
+        for outfit_id, tags in inferred_outfits.items()
+    }
     anchors = {
         normalize_tag(value)
         for value in project.get("caption_anchor_tags", [])
@@ -77,11 +79,13 @@ def apply_character_semantic_factorization(state, result: StepResult) -> StepRes
     total_suppressed = 0
     for record in records:
         image_key = str(record.get("image") or "")
-        outfit_id = str(bindings.get(image_key, {}).get("outfit") or "default")
+        binding = bindings.get(image_key, {})
+        outfit_id = str(binding.get("outfit") or "default") if isinstance(binding, Mapping) else "default"
         outfit = outfits.get(outfit_id, outfits.get("default", {}))
         outfit_token = str(outfit.get("token") or "").strip()
-        manual_outfit = {normalize_tag(tag) for tag in outfit.get("features", [])}
-        suppressed = inferred_identity | manual_outfit | inferred_outfits.get(outfit_id, set())
+        manual_outfit = manual_outfits.get(outfit_id, set())
+        inferred_outfit = inferred_outfits.get(outfit_id, set())
+        suppressed = inferred_identity | manual_outfit | inferred_outfit
         protected = {
             normalize_tag(value)
             for value in (character_token, outfit_token)
@@ -115,14 +119,11 @@ def apply_character_semantic_factorization(state, result: StepResult) -> StepRes
             "backend": counts.backend,
             "error": counts.error,
         }
+        suppressed_normalized = {normalize_tag(tag) for tag in suppressed_here}
         concepts = dict(record.get("semantic_concepts") or {})
-        concepts["factorized_identity_features"] = sorted(
-            normalized for normalized in inferred_identity if normalized in {normalize_tag(tag) for tag in suppressed_here}
-        )
+        concepts["factorized_identity_features"] = sorted(inferred_identity & suppressed_normalized)
         concepts["factorized_outfit_features"] = sorted(
-            normalized
-            for normalized in (manual_outfit | inferred_outfits.get(outfit_id, set()))
-            if normalized in {normalize_tag(tag) for tag in suppressed_here}
+            (manual_outfit | inferred_outfit) & suppressed_normalized
         )
         record["semantic_concepts"] = concepts
 
@@ -135,8 +136,15 @@ def apply_character_semantic_factorization(state, result: StepResult) -> StepRes
         "min_inference_samples": _MIN_INFERENCE_SAMPLES,
         "manual_character_features": sorted(manual_character_features),
         "inferred_identity_features": sorted(inferred_identity),
+        "manual_outfit_features": {
+            outfit_id: sorted(tags)
+            for outfit_id, tags in sorted(manual_outfits.items())
+            if tags
+        },
         "inferred_outfit_features": {
-            outfit_id: sorted(tags) for outfit_id, tags in sorted(inferred_outfits.items()) if tags
+            outfit_id: sorted(tags)
+            for outfit_id, tags in sorted(inferred_outfits.items())
+            if tags
         },
     }
     manifest.setdefault("summary", {})["semantic_factorization_updates"] = changed
@@ -165,7 +173,7 @@ def apply_character_semantic_factorization(state, result: StepResult) -> StepRes
     )
 
 
-def infer_invariant_identity_tags(records: list[Mapping[str, Any]]) -> set[str]:
+def infer_invariant_identity_tags(records: list[Mapping[str, object]]) -> set[str]:
     if len(records) < _MIN_INFERENCE_SAMPLES:
         return set()
     counts: Counter[str] = Counter()
@@ -185,12 +193,13 @@ def infer_invariant_identity_tags(records: list[Mapping[str, Any]]) -> set[str]:
 
 
 def infer_outfit_features_by_group(
-    records: list[Mapping[str, Any]], bindings: Mapping[str, Any]
+    records: list[Mapping[str, object]], bindings: Mapping[str, object]
 ) -> dict[str, set[str]]:
-    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for record in records:
         key = str(record.get("image") or "")
-        outfit_id = str(bindings.get(key, {}).get("outfit") or "default")
+        binding = bindings.get(key, {})
+        outfit_id = str(binding.get("outfit") or "default") if isinstance(binding, Mapping) else "default"
         grouped[outfit_id].append(record)
 
     result: dict[str, set[str]] = {}
@@ -219,7 +228,7 @@ def infer_outfit_features_by_group(
     return result
 
 
-def _record_tag_counts(records: list[Mapping[str, Any]]) -> Counter[str]:
+def _record_tag_counts(records: list[Mapping[str, object]]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for record in records:
         tags = {
