@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from .config import resolve_profiles, stable_hash, write_json_atomic
 from .models import PipelineError, StepResult
 from .prepared import load_current_generation
+from .target_dataset_diagnostics import target_dataset_diagnostics
 from .target_training_advisor import target_training_advice
 
 
@@ -79,8 +80,14 @@ def _augment_preflight_report(state, report: dict[str, Any]) -> None:
         project_overrides=project.get("overrides", {}),
     )
 
+    caption_manifest = _caption_manifest(state)
+    caption_records = list(caption_manifest.get("records", [])) if caption_manifest else []
     image_count = _prepared_image_count(state)
-    style_distribution = _style_distribution(state) if target_type == "style" else None
+    style_distribution = (
+        dict(caption_manifest.get("style_distribution") or {})
+        if target_type == "style" and caption_manifest
+        else None
+    )
     current_images_seen = _current_images_seen(project)
     advice = target_training_advice(
         target_type,
@@ -95,6 +102,16 @@ def _augment_preflight_report(state, report: dict[str, Any]) -> None:
     warnings = report.setdefault("warnings", [])
     for warning in advice.get("warnings", []):
         _append_unique(warnings, "Target training advisory: " + str(warning))
+
+    diagnostics = target_dataset_diagnostics(
+        target_type,
+        caption_records=caption_records,
+        dataset_semantics=project.get("dataset_semantics_snapshot", {}),
+        limits=profiles.merged.get("limits", {}).get("target_dataset", {}),
+    )
+    checks["target_dataset_diagnostics"] = diagnostics
+    for warning in diagnostics.get("warnings", []):
+        _append_unique(warnings, "Target dataset diagnostic: " + str(warning))
 
     if target_type != "style":
         return
@@ -118,7 +135,7 @@ def assess_style_distribution(
 ) -> dict[str, Any]:
     """Assess style-only subject/composition entanglement risk.
 
-    A single concentrated axis is a warning.  Blocking requires both an extremely
+    A single concentrated axis is a warning. Blocking requires both an extremely
     concentrated subject and an extremely concentrated portrait/background axis,
     which is much stronger evidence that the requested target is not separable style.
     """
@@ -191,7 +208,7 @@ def _prepared_image_count(state) -> int:
     return max(1, len(generation.manifest.get("images", [])))
 
 
-def _style_distribution(state) -> dict[str, Any] | None:
+def _caption_manifest(state) -> dict[str, Any] | None:
     path = state.project_dir / "review" / "captions" / "manifest.json"
     if not path.is_file():
         return None
@@ -199,8 +216,7 @@ def _style_distribution(state) -> dict[str, Any] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    value = payload.get("style_distribution")
-    return dict(value) if isinstance(value, Mapping) else None
+    return payload if isinstance(payload, dict) else None
 
 
 def _current_images_seen(project: Mapping[str, Any]) -> int | None:
