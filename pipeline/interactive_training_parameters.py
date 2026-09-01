@@ -5,13 +5,12 @@ from rich.table import Table
 
 from .interactive_outfit import InteractiveWizard as BaseInteractiveWizard
 from .target_training_advisor import target_training_advice
+from .target_training_apply import apply_target_preferred_start
 from .training_parameters import (
-    MANAGED_TRAINING_KEYS,
     TRAINING_PARAMETER_SPECS,
     effective_training_settings,
     reset_key_training_overrides,
     strategy_training_defaults,
-    update_key_training_overrides,
 )
 from .wizard import MenuItem
 
@@ -123,25 +122,14 @@ class InteractiveWizard(BaseInteractiveWizard):
             )
             return
 
-        preferred = advice["preferred_start"]
-        values = {
-            key: current[key]
-            for key in MANAGED_TRAINING_KEYS
-            if key in current
-        }
-        values.update(
-            {
-                "network_dim": int(preferred["network_dim"]),
-                "network_alpha": int(preferred["network_alpha"]),
-                "unet_lr": float(preferred["unet_lr"]),
-            }
-        )
-        config.data["images_seen"] = int(preferred["images_seen"])
-        config.data["overrides"] = update_key_training_overrides(
-            config.overrides,
+        images_seen, overrides = apply_target_preferred_start(
             strategy=config.strategy,
-            values=values,
+            overrides=config.overrides,
+            current_training=current,
+            advice=advice,
         )
+        config.data["images_seen"] = images_seen
+        config.data["overrides"] = overrides
         config.save()
         self.console.print(
             self._b(
