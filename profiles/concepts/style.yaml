@@ -48,6 +48,15 @@ distribution:
     simple_background_fraction: 0.8
     minimum_multiple_people_fraction: 0.05
 
+# These guardrails are intentionally under `limits`, which is already part of the
+# preflight/train fingerprint. One concentrated axis is only a warning; automatic
+# blocking requires severe subject concentration plus severe composition/background
+# concentration, reducing false positives for intentionally portrait-oriented styles.
+limits:
+  style_bias:
+    minimum_images: 12
+    extreme_fraction: 0.95
+
 evaluation:
   identity: false
   leakage: true
