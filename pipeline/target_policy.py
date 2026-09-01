@@ -34,17 +34,21 @@ def target_caption_policy(target_type: str) -> dict[str, str]:
             "outfit_features": "suppress",
             "invariant_outfit_tags": "suppress",
         }
-    return {
-        "character_token": "always",
-        "outfit_token": "when_present",
-        "character_features": "suppress",
-        "outfit_features": "preserve",
-    }
+    if target_type == "character":
+        return {
+            "character_token": "always",
+            "outfit_token": "when_present",
+            "character_features": "suppress",
+            "outfit_features": "preserve",
+        }
+    return {}
 
 
 def attach_target_aware_dataset_semantics_snapshot(state, workspace):
     """Attach frozen dataset semantics without stealing an outfit LoRA trigger."""
 
+    if getattr(workspace, "concept_type", None) != "character":
+        return state
     project = state.payload.get("project", {})
     configured_trigger = str(project.get("trigger") or "")
     state = attach_dataset_semantics_snapshot(state, workspace)
@@ -135,7 +139,7 @@ def _apply_character_outfit_semantic_captions(state, result: StepResult) -> Step
     outfit_token = str(target_outfit.get("token") or "").strip()
     character_features = {normalize_tag(tag) for tag in character.get("features", [])}
     manual_outfit_features = {normalize_tag(tag) for tag in target_outfit.get("features", [])}
-    inferred_outfit_features = _infer_invariant_outfit_tags(records)
+    inferred_outfit_features = _infer_invariant_outfit_tags(records) - manual_outfit_features
     suppressed_features = character_features | manual_outfit_features | inferred_outfit_features
     concept_tokens = {normalize_tag(value) for value in (character_token, outfit_token) if value}
 
