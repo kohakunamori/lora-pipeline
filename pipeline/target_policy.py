@@ -13,16 +13,12 @@ from .tokenizers import count_sdxl_tokens
 
 
 _OUTFIT_INVARIANT_MIN_COVERAGE = 0.80
+_MIN_INFERENCE_SAMPLES = 3
 _RUNTIME_HOOK_INSTALLED = False
 
 
 def target_caption_policy(target_type: str) -> dict[str, str]:
-    """Return the semantic caption ownership rules for one training target.
-
-    Character training keeps the existing dataset-owned character/outfit token model.
-    Character-outfit training instead makes the TrainingConfig trigger the sole outfit
-    concept token and suppresses stable garment descriptors so they are learned by it.
-    """
+    """Return the semantic caption ownership rules for one training target."""
 
     if target_type == "character_outfit":
         return {
@@ -39,7 +35,9 @@ def target_caption_policy(target_type: str) -> dict[str, str]:
             "character_token": "always",
             "outfit_token": "when_present",
             "character_features": "suppress",
-            "outfit_features": "preserve",
+            "invariant_identity_tags": "suppress",
+            "outfit_features": "suppress",
+            "invariant_outfit_tags": "suppress_when_specific",
         }
     return {}
 
@@ -64,6 +62,9 @@ def attach_target_aware_dataset_semantics_snapshot(state, workspace):
         project["trigger_source"] = "training_config"
         project.pop("training_config_trigger", None)
         state.save()
+    else:
+        # attach_dataset_semantics_snapshot already saved; persist the refined target policy.
+        state.save()
     return state
 
 
@@ -80,9 +81,14 @@ def install_target_policy_runtime_hook() -> None:
     def apply(state, result: StepResult) -> StepResult:
         project = state.payload.get("project", {})
         target_type = str(project.get("training_target_type", project.get("type", "")))
-        if target_type != "character_outfit":
-            return original(state, result)
-        return _apply_character_outfit_semantic_captions(state, result)
+        if target_type == "character_outfit":
+            return _apply_character_outfit_semantic_captions(state, result)
+        result = original(state, result)
+        if target_type == "character":
+            from .semantic_factorization import apply_character_semantic_factorization
+
+            return apply_character_semantic_factorization(state, result)
+        return result
 
     semantic_runtime._apply_semantic_captions = apply
     _RUNTIME_HOOK_INSTALLED = True
@@ -222,6 +228,7 @@ def _apply_character_outfit_semantic_captions(state, result: StepResult) -> Step
         "target_type": "character_outfit",
         "outfit_id": target_outfit_id,
         "invariant_outfit_min_coverage": _OUTFIT_INVARIANT_MIN_COVERAGE,
+        "min_inference_samples": _MIN_INFERENCE_SAMPLES,
         "manual_outfit_features": sorted(manual_outfit_features),
         "inferred_invariant_outfit_features": sorted(inferred_outfit_features),
     }
@@ -251,7 +258,7 @@ def _infer_invariant_outfit_tags(records: list[Mapping[str, Any]]) -> set[str]:
     """Infer only high-coverage garment tags; avoid suppressing pose/scene/content tags."""
 
     total = len(records)
-    if not total:
+    if total < _MIN_INFERENCE_SAMPLES:
         return set()
     counts: Counter[str] = Counter()
     for record in records:
