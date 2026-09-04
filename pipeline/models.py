@@ -31,17 +31,23 @@ PROJECT_UTILITY_STEPS = (
 )
 
 # The actual Project training lifecycle. `run` and next-action navigation must
-# use this sequence rather than replaying DatasetWorkspace curation inside the
-# frozen training workspace.
+# use this sequence rather than replaying DatasetWorkspace curation or Results
+# work inside the frozen training workspace.
 PROJECT_RUN_STEPS = (
     "caption",
     "prepare",
     "preflight",
     "train",
+)
+
+# Result operations are repeatable derivatives of a completed run. They remain
+# persisted for compatibility for now, but are intentionally not prerequisites
+# for considering the training lifecycle complete.
+PROJECT_RESULT_STEPS = (
     "evaluate",
 )
 
-STEP_NAMES = PROJECT_UTILITY_STEPS + PROJECT_RUN_STEPS
+STEP_NAMES = PROJECT_UTILITY_STEPS + PROJECT_RUN_STEPS + PROJECT_RESULT_STEPS
 OPTIONAL_STEPS = frozenset({"dedup", "identity", "caption", "review", "evaluate"})
 
 
