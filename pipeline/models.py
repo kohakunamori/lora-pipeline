@@ -27,14 +27,14 @@ PROJECT_UTILITY_STEPS = (
     "inspect",
     "dedup",
     "identity",
+    "caption",
     "review",
 )
 
-# The actual Project training lifecycle. `run` and next-action navigation must
-# use this sequence rather than replaying DatasetWorkspace curation or Results
-# work inside the frozen training workspace.
+# The actual Project training lifecycle. Caption generation/normalization is an
+# input transform of `prepare` (future name: materialize), rather than a separate
+# state-machine stage. Results are also kept outside this lifecycle.
 PROJECT_RUN_STEPS = (
-    "caption",
     "prepare",
     "preflight",
     "train",
