@@ -181,7 +181,7 @@ def _effective_caption_mode(project: Mapping[str, Any], requested: Any) -> str:
         if isinstance(preferences, Mapping) and preferences.get("caption_mode")
         else None
     )
-    mode = str(requested or project.get("caption_mode") or preference_mode or "auto")
+    mode = str(requested or project.get("caption_mode") or preference_mode or "skip")
     if mode != "auto":
         return mode
     snapshot = project.get("dataset_snapshot", {})
