@@ -192,16 +192,11 @@ def run(
 
 
 def _resolve_caption_mode(project: Mapping[str, Any], requested: str | None) -> str:
-    preferences = project.get("interactive_preferences", {})
-    preference_mode = (
-        str(preferences.get("caption_mode"))
-        if isinstance(preferences, Mapping) and preferences.get("caption_mode")
-        else None
-    )
-    # Direct legacy `prepare` calls historically consumed raw sidecars without
-    # implicitly running the tagger. Only an explicit/requested workflow mode
-    # opts into a caption transform.
-    mode = str(requested or project.get("caption_mode") or preference_mode or "skip")
+    # A direct legacy `prepare.run(state)` call historically consumed raw
+    # sidecars (or explicit trigger-only fallback) and never inherited a guided
+    # workflow preference that could unexpectedly start a tagger. Guided
+    # training passes its caption mode explicitly through service.run_remaining.
+    mode = str(requested or project.get("caption_mode") or "skip")
     if mode != "auto":
         return mode
 
