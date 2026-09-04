@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any, Mapping
 
 from ..config import read_yaml, sha256_file, stable_hash, write_json_atomic
 from ..dataset.caption_cleaner import caption_prefix
@@ -15,10 +16,31 @@ from ..prepared import generation_path, generations_root, set_current_generation
 from ..state import ProjectState
 
 
-def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepResult:
+def run(
+    state: ProjectState,
+    *,
+    allow_trigger_only: bool | None = None,
+    caption_mode: str | None = None,
+) -> StepResult:
     project_dir = state.project_dir
     raw = project_dir / "raw"
     images = discover_images(raw)
+    project = state.payload["project"]
+    resolved_caption_mode = _resolve_caption_mode(project, caption_mode)
+
+    # Caption generation/normalization is a transform of the frozen training
+    # input, not an independent training lifecycle stage. Keep the existing
+    # caption implementation as a compatibility utility, but invoke it directly
+    # here so the prepared generation owns the effective captions it trains on.
+    caption_details: dict[str, Any] = {}
+    if resolved_caption_mode != "skip":
+        from . import caption as caption_step
+
+        caption_result = caption_step.run(state, mode=resolved_caption_mode)
+        caption_details = dict(caption_result.details)
+    else:
+        project["caption_mode"] = "skip"
+
     exclusions_path = project_dir / "review" / "exclusions.yaml"
     exclusions = (
         set(read_yaml(exclusions_path).get("excluded", []))
@@ -26,8 +48,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         else set()
     )
     generated = project_dir / "review" / "captions" / "generated"
-    trigger = str(state.payload["project"]["trigger"])
-    project = state.payload["project"]
+    trigger = str(project["trigger"])
     fixed_prefix = caption_prefix(trigger, project.get("caption_anchor_tags", []))
     fallback_caption = ", ".join(fixed_prefix)
     if allow_trigger_only is not None:
@@ -45,9 +66,9 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         caption_relative = unique_caption_relative(relative)
         generated_caption = generated / caption_relative
         raw_caption = image.with_suffix(".txt")
-        if generated_caption.is_file():
+        if resolved_caption_mode != "skip" and generated_caption.is_file():
             caption_bytes = generated_caption.read_bytes()
-            caption_source = "caption-step"
+            caption_source = "caption-transform"
         elif raw_caption.is_file():
             caption_bytes = raw_caption.read_bytes()
             caption_source = "existing-passthrough"
@@ -82,13 +103,13 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         preview = ", ".join(missing[:5])
         raise PipelineError(
             f"{len(missing)} image(s) have no usable caption ({preview}). "
-            "Run caption, provide sidecars, or explicitly enable --allow-trigger-only."
+            "Add captions in the Dataset workspace or explicitly enable --allow-trigger-only."
         )
     if not planned:
         raise PipelineError("No images remain after exclusions")
 
     manifest_basis = {
-        "schema_version": 2,
+        "schema_version": 3,
         "images": [
             {
                 key: value
@@ -101,7 +122,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
         "trigger": trigger,
         "fixed_prefix": list(fixed_prefix),
         "training_target_type": project.get("training_target_type", project.get("type")),
-        "caption_mode": project.get("caption_mode"),
+        "caption_mode": resolved_caption_mode,
         "allow_trigger_only": allow_fallback,
     }
     manifest_hash = stable_hash(manifest_basis)
@@ -142,6 +163,7 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
             if stage and stage.exists() and stage != Path("."):
                 shutil.rmtree(stage, ignore_errors=True)
 
+    project["caption_mode"] = resolved_caption_mode
     pointer = set_current_generation(
         project_dir,
         generation_id=generation_id,
@@ -159,9 +181,31 @@ def run(state: ProjectState, *, allow_trigger_only: bool | None = None) -> StepR
             "current_pointer": str(pointer),
             "reused_generation": reused_generation,
             "fixed_prefix": list(fixed_prefix),
+            "caption_mode": resolved_caption_mode,
+            "caption_transform": caption_details,
             "trigger_only_captions": sum(
                 record["caption_source"] == "explicit-trigger-only"
                 for record in planned
             ),
         },
     )
+
+
+def _resolve_caption_mode(project: Mapping[str, Any], requested: str | None) -> str:
+    preferences = project.get("interactive_preferences", {})
+    preference_mode = (
+        str(preferences.get("caption_mode"))
+        if isinstance(preferences, Mapping) and preferences.get("caption_mode")
+        else None
+    )
+    mode = str(requested or project.get("caption_mode") or preference_mode or "auto")
+    if mode != "auto":
+        return mode
+
+    snapshot = project.get("dataset_snapshot", {})
+    if isinstance(snapshot, Mapping):
+        image_count = int(snapshot.get("image_count", 0) or 0)
+        caption_count = int(snapshot.get("caption_count", 0) or 0)
+        if image_count > 0 and caption_count == image_count:
+            return "existing_taglist_clean"
+    return "generate"
