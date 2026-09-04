@@ -10,9 +10,9 @@ from .dataset.image_info import discover_images, inspect_dataset
 from .evaluation.generation import GenerationBackend
 from .fingerprints import compute_step_signature
 from .models import (
+    ALL_STEP_NAMES,
     OPTIONAL_STEPS,
     PROJECT_RUN_STEPS,
-    STEP_NAMES,
     PipelineError,
     StateError,
     StepResult,
@@ -143,7 +143,7 @@ def run_single_step(
     trainer_backend: TrainerBackend | None = None,
     generation_backend: GenerationBackend | None = None,
 ) -> StepResult:
-    if name not in STEP_NAMES:
+    if name not in ALL_STEP_NAMES:
         raise StateError(f"Unknown step: {name}")
     options = _step_options(
         name,
