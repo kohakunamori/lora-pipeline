@@ -252,6 +252,8 @@ def run_remaining(
     invalid = skip - OPTIONAL_STEPS
     if invalid:
         raise PipelineError("These steps cannot be skipped: " + ", ".join(sorted(invalid)))
+    if "caption" in skip:
+        caption_mode = "skip"
     results: list[tuple[str, StepResult]] = []
     can_break = break_lock
     for name in PROJECT_RUN_STEPS:
