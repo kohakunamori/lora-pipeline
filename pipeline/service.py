@@ -5,11 +5,19 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import load_base_registry, repository_root
-from .dataset.image_info import discover_images
+from .config import load_base_registry, repository_root, write_json_atomic
+from .dataset.image_info import discover_images, inspect_dataset
 from .evaluation.generation import GenerationBackend
 from .fingerprints import compute_step_signature
-from .models import OPTIONAL_STEPS, STEP_NAMES, PipelineError, StateError, StepResult, StepStatus
+from .models import (
+    OPTIONAL_STEPS,
+    PROJECT_RUN_STEPS,
+    STEP_NAMES,
+    PipelineError,
+    StateError,
+    StepResult,
+    StepStatus,
+)
 from .state import ProjectState, execute_step, project_lock
 from .steps import caption, dedup, evaluate, identity, inspect, preflight, prepare, review, train
 from .trainer.base import TrainerBackend
@@ -80,6 +88,23 @@ def create_project(
         state.payload["project"]["import_error"] = f"{type(exc).__name__}: {exc}"
         state.save()
         raise
+
+    # Inspection is a dataset import invariant, not a training-run stage. Freeze
+    # it immediately beside the immutable Project raw snapshot so Preflight and
+    # legacy readers still consume the same manifest without replaying `inspect`
+    # during every Project run.
+    inspection = inspect_dataset(destination / "raw")
+    inspection_path = destination / "dataset-manifest.json"
+    write_json_atomic(inspection_path, inspection)
+    state.payload["steps"]["inspect"] = {
+        "status": StepStatus.SKIPPED.value,
+        "attempts": 0,
+        "reason": "inspection frozen when the Project raw snapshot was created",
+        "permanent": True,
+        "input_hash": str(inspection["input_hash"]),
+        "output_manifest": str(inspection_path),
+        "details": dict(inspection["summary"]),
+    }
     state.payload["project"].update(
         {
             "budget": {"unit": "images_seen", "value": images_seen},
@@ -225,7 +250,7 @@ def run_remaining(
         raise PipelineError("These steps cannot be skipped: " + ", ".join(sorted(invalid)))
     results: list[tuple[str, StepResult]] = []
     can_break = break_lock
-    for name in STEP_NAMES:
+    for name in PROJECT_RUN_STEPS:
         state = ProjectState.load(state.project_dir)
         if state.step(name).get("permanent") and state.status(name) is StepStatus.SKIPPED:
             continue
