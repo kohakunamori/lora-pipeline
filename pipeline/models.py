@@ -20,9 +20,8 @@ class StepStatus(StrEnum):
     FAILED = "failed"
 
 
-# Steps that still have persisted ProjectState records for backward-compatible
-# explicit CLI/API use. Dataset curation utilities are deliberately separated
-# from the training-run lifecycle below.
+# Persisted only so old Projects and explicit legacy CLI/API calls keep working
+# while DatasetWorkspace owns curation going forward.
 PROJECT_UTILITY_STEPS = (
     "inspect",
     "dedup",
@@ -40,14 +39,17 @@ PROJECT_RUN_STEPS = (
     "train",
 )
 
-# Result operations are repeatable derivatives of a completed run. They remain
-# persisted for compatibility for now, but are intentionally not prerequisites
-# for considering the training lifecycle complete.
+# Result operations are repeatable derivatives of a completed run.
 PROJECT_RESULT_STEPS = (
     "evaluate",
 )
 
-STEP_NAMES = PROJECT_UTILITY_STEPS + PROJECT_RUN_STEPS + PROJECT_RESULT_STEPS
+# User-facing Project steps. Wizard/manual Project navigation should use this
+# list; Dataset curation utilities intentionally do not appear here.
+STEP_NAMES = PROJECT_RUN_STEPS + PROJECT_RESULT_STEPS
+
+# Full persisted/dispatch namespace, including legacy compatibility records.
+ALL_STEP_NAMES = PROJECT_UTILITY_STEPS + STEP_NAMES
 OPTIONAL_STEPS = frozenset({"dedup", "identity", "caption", "review", "evaluate"})
 
 
