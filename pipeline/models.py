@@ -39,17 +39,19 @@ PROJECT_RUN_STEPS = (
     "train",
 )
 
-# Result operations are repeatable derivatives of a completed run.
+# Result operations are repeatable derivatives of a completed run and belong to
+# the Results area, not Project step navigation.
 PROJECT_RESULT_STEPS = (
     "evaluate",
 )
 
-# User-facing Project steps. Wizard/manual Project navigation should use this
-# list; Dataset curation utilities intentionally do not appear here.
-STEP_NAMES = PROJECT_RUN_STEPS + PROJECT_RESULT_STEPS
+# User-facing Project steps. Dataset curation and Results operations are both
+# intentionally excluded from the Project step menu.
+STEP_NAMES = PROJECT_RUN_STEPS
 
-# Full persisted/dispatch namespace, including legacy compatibility records.
-ALL_STEP_NAMES = PROJECT_UTILITY_STEPS + STEP_NAMES
+# Full persisted/dispatch namespace, including legacy compatibility records and
+# repeatable Results operations.
+ALL_STEP_NAMES = PROJECT_UTILITY_STEPS + PROJECT_RUN_STEPS + PROJECT_RESULT_STEPS
 OPTIONAL_STEPS = frozenset({"dedup", "identity", "caption", "review", "evaluate"})
 
 
