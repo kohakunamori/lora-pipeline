@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from .config import load_base_registry, resolve_profiles, sha256_file, stable_hash
 from .dataset.image_info import discover_images
-from .models import STEP_NAMES, PipelineError
+from .models import ALL_STEP_NAMES, PipelineError
 from .prepared import load_current_generation
 
 if TYPE_CHECKING:
@@ -41,14 +41,14 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 
 
 def downstream_steps(name: str) -> tuple[str, ...]:
-    if name not in STEP_NAMES:
+    if name not in ALL_STEP_NAMES:
         raise PipelineError(f"Unknown step: {name}")
-    reverse: dict[str, set[str]] = {step: set() for step in STEP_NAMES}
+    reverse: dict[str, set[str]] = {step: set() for step in ALL_STEP_NAMES}
     for step, dependencies in STEP_DEPENDENCIES.items():
         for dependency in dependencies:
             reverse[dependency].add(step)
     discovered: list[str] = []
-    queue: deque[str] = deque(sorted(reverse[name], key=STEP_NAMES.index))
+    queue: deque[str] = deque(sorted(reverse[name], key=ALL_STEP_NAMES.index))
     seen: set[str] = set()
     while queue:
         step = queue.popleft()
@@ -56,8 +56,8 @@ def downstream_steps(name: str) -> tuple[str, ...]:
             continue
         seen.add(step)
         discovered.append(step)
-        queue.extend(sorted(reverse[step], key=STEP_NAMES.index))
-    return tuple(sorted(discovered, key=STEP_NAMES.index))
+        queue.extend(sorted(reverse[step], key=ALL_STEP_NAMES.index))
+    return tuple(sorted(discovered, key=ALL_STEP_NAMES.index))
 
 
 def compute_step_signature(
@@ -68,7 +68,7 @@ def compute_step_signature(
 ) -> str:
     """Hash only the effective inputs that decide whether a step is reusable."""
 
-    if name not in STEP_NAMES:
+    if name not in ALL_STEP_NAMES:
         raise PipelineError(f"Unknown step: {name}")
     options = dict(options or {})
     project = state.payload["project"]
