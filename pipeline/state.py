@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import read_yaml, write_yaml_atomic
-from .models import STEP_NAMES, StateError, StepResult, StepStatus
+from .models import PROJECT_RUN_STEPS, STEP_NAMES, StateError, StepResult, StepStatus
 
 
 def utc_now() -> str:
@@ -250,7 +250,7 @@ class ProjectState:
         )
 
     def next_actionable_step(self) -> str | None:
-        for name in STEP_NAMES:
+        for name in PROJECT_RUN_STEPS:
             status = self.status(name)
             if status in {
                 StepStatus.PENDING,
