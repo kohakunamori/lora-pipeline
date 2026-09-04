@@ -175,13 +175,10 @@ def compute_step_signature(
 
 
 def _effective_caption_mode(project: Mapping[str, Any], requested: Any) -> str:
-    preferences = project.get("interactive_preferences", {})
-    preference_mode = (
-        str(preferences.get("caption_mode"))
-        if isinstance(preferences, Mapping) and preferences.get("caption_mode")
-        else None
-    )
-    mode = str(requested or project.get("caption_mode") or preference_mode or "skip")
+    # Match prepare._resolve_caption_mode: guided training passes the mode
+    # explicitly; direct materialization must not inherit interactive workflow
+    # preferences and accidentally start an optional tagger backend.
+    mode = str(requested or project.get("caption_mode") or "skip")
     if mode != "auto":
         return mode
     snapshot = project.get("dataset_snapshot", {})
