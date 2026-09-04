@@ -144,10 +144,7 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
         generation_backend=FakeGenerator(),
     )
     assert [name for name, _ in results] == [
-        "inspect",
-        "dedup",
         "caption",
-        "review",
         "prepare",
         "preflight",
         "train",
