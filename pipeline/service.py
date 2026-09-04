@@ -130,7 +130,7 @@ def run_single_step(
     break_lock: bool = False,
     dry_run: bool = False,
     verbose: int = 0,
-    caption_mode: str = "generate",
+    caption_mode: str | None = None,
     exclude_exact: bool = False,
     exclusions: list[str] | None = None,
     allow_trigger_only: bool | None = None,
@@ -198,11 +198,15 @@ def run_single_step(
         elif name == "identity":
             handler = lambda: identity.run(state)
         elif name == "caption":
-            handler = lambda: caption.run(state, mode=caption_mode)
+            handler = lambda: caption.run(state, mode=caption_mode or "generate")
         elif name == "review":
             handler = lambda: review.run(state, exclude=exclusions)
         elif name == "prepare":
-            handler = lambda: prepare.run(state, allow_trigger_only=allow_trigger_only)
+            handler = lambda: prepare.run(
+                state,
+                allow_trigger_only=allow_trigger_only,
+                caption_mode=caption_mode,
+            )
         elif name == "preflight":
             handler = lambda: preflight.run(state)
         elif name == "train":
@@ -367,11 +371,14 @@ def _step_options(name: str, **values: Any) -> dict[str, Any]:
     if name == "dedup":
         return {"exclude_exact": values.get("exclude_exact", False)}
     if name == "caption":
-        return {"mode": values.get("caption_mode", "generate")}
+        return {"mode": values.get("caption_mode") or "generate"}
     if name == "review":
         return {"exclusions": sorted(values.get("exclusions") or [])}
     if name == "prepare":
-        return {"allow_trigger_only": values.get("allow_trigger_only")}
+        return {
+            "allow_trigger_only": values.get("allow_trigger_only"),
+            "caption_mode": values.get("caption_mode"),
+        }
     if name == "train":
         return {
             "images_seen_override": values.get("images_seen"),
