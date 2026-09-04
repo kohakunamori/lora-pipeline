@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 6
+FINGERPRINT_VERSION = 7
 TRAINING_PROFILE_KEYS = (
     "precision",
     "attention",
@@ -33,7 +33,7 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "identity": ("inspect",),
     "caption": ("inspect",),
     "review": ("dedup", "identity", "caption"),
-    "prepare": ("inspect", "review", "caption"),
+    "prepare": (),
     "preflight": ("prepare",),
     "train": ("preflight", "prepare"),
     "evaluate": ("train",),
@@ -91,10 +91,13 @@ def compute_step_signature(
         payload.update(
             {
                 "concept_type": project.get("type"),
+                "training_target_type": project.get("training_target_type", project.get("type")),
                 "trigger": project.get("trigger"),
+                "caption_anchor_tags": project.get("caption_anchor_tags", []),
+                "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
                 "raw_images": _raw_images(state),
                 "raw_captions": _raw_captions(state),
-                "caption_profile": profiles.concept.get("caption", {}),
+                "caption_profile": profiles.merged.get("caption", {}),
                 "tagger_profile": profiles.concept.get("tagger", {}),
                 "token_budget": profiles.merged.get("caption", {}).get(
                     "max_token_length",
@@ -112,17 +115,33 @@ def compute_step_signature(
             state.project_dir / "review" / "exclusions.yaml"
         )
     elif name == "prepare":
+        profiles = _profiles(state)
         payload.update(
             {
+                "concept_type": project.get("type"),
+                "training_target_type": project.get("training_target_type", project.get("type")),
                 "trigger": project.get("trigger"),
+                "caption_anchor_tags": project.get("caption_anchor_tags", []),
+                "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
                 "raw_images": _raw_images(state),
                 "raw_captions": _raw_captions(state),
-                "caption": _step_output_fingerprint(state, "caption"),
                 "exclusions": _hash_optional(
                     state.project_dir / "review" / "exclusions.yaml"
                 ),
-                "caption_mode": project.get("caption_mode"),
-                "allow_trigger_only": bool(project.get("allow_trigger_only", False)),
+                "caption_mode": _effective_caption_mode(project, options.get("caption_mode")),
+                "caption_profile": profiles.merged.get("caption", {}),
+                "tagger_profile": profiles.concept.get("tagger", {}),
+                "token_budget": profiles.merged.get("caption", {}).get(
+                    "max_token_length",
+                    profiles.hardware.get("caption", {}).get(
+                        "default_max_token_length", 75
+                    ),
+                ),
+                "allow_trigger_only": (
+                    bool(options["allow_trigger_only"])
+                    if options.get("allow_trigger_only") is not None
+                    else bool(project.get("allow_trigger_only", False))
+                ),
             }
         )
     elif name in {"preflight", "train"}:
@@ -153,6 +172,25 @@ def compute_step_signature(
             }
         )
     return stable_hash(payload)
+
+
+def _effective_caption_mode(project: Mapping[str, Any], requested: Any) -> str:
+    preferences = project.get("interactive_preferences", {})
+    preference_mode = (
+        str(preferences.get("caption_mode"))
+        if isinstance(preferences, Mapping) and preferences.get("caption_mode")
+        else None
+    )
+    mode = str(requested or project.get("caption_mode") or preference_mode or "auto")
+    if mode != "auto":
+        return mode
+    snapshot = project.get("dataset_snapshot", {})
+    if isinstance(snapshot, Mapping):
+        image_count = int(snapshot.get("image_count", 0) or 0)
+        caption_count = int(snapshot.get("caption_count", 0) or 0)
+        if image_count > 0 and caption_count == image_count:
+            return "existing_taglist_clean"
+    return "generate"
 
 
 def _training_profile_slice(merged: Mapping[str, Any]) -> dict[str, Any]:
