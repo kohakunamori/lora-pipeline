@@ -198,7 +198,10 @@ def _resolve_caption_mode(project: Mapping[str, Any], requested: str | None) -> 
         if isinstance(preferences, Mapping) and preferences.get("caption_mode")
         else None
     )
-    mode = str(requested or project.get("caption_mode") or preference_mode or "auto")
+    # Direct legacy `prepare` calls historically consumed raw sidecars without
+    # implicitly running the tagger. Only an explicit/requested workflow mode
+    # opts into a caption transform.
+    mode = str(requested or project.get("caption_mode") or preference_mode or "skip")
     if mode != "auto":
         return mode
 
