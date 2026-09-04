@@ -20,18 +20,28 @@ class StepStatus(StrEnum):
     FAILED = "failed"
 
 
-STEP_NAMES = (
+# Steps that still have persisted ProjectState records for backward-compatible
+# explicit CLI/API use. Dataset curation utilities are deliberately separated
+# from the training-run lifecycle below.
+PROJECT_UTILITY_STEPS = (
     "inspect",
     "dedup",
     "identity",
-    "caption",
     "review",
+)
+
+# The actual Project training lifecycle. `run` and next-action navigation must
+# use this sequence rather than replaying DatasetWorkspace curation inside the
+# frozen training workspace.
+PROJECT_RUN_STEPS = (
+    "caption",
     "prepare",
     "preflight",
     "train",
     "evaluate",
 )
 
+STEP_NAMES = PROJECT_UTILITY_STEPS + PROJECT_RUN_STEPS
 OPTIONAL_STEPS = frozenset({"dedup", "identity", "caption", "review", "evaluate"})
 
 
