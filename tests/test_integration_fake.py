@@ -144,11 +144,11 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
         generation_backend=FakeGenerator(),
     )
     assert [name for name, _ in results] == [
-        "caption",
         "prepare",
         "preflight",
         "train",
     ]
+    assert results[0][1].details["caption_mode"] == "skip"
     completed = load_project("style-test")
     assert completed.next_actionable_step() is None
     for step_name in ("inspect", "prepare", "preflight", "train"):
