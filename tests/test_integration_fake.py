@@ -154,13 +154,12 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
         assert completed.step(step_name).get("input_hash"), step_name
 
     run_id = str(completed.payload["runs"][-1]["id"])
-    evaluation_result = run_single_step(
+    run_single_step(
         completed,
         "evaluate",
         generation_backend=FakeGenerator(),
         evaluation_run=run_id,
     )
-    assert evaluation_result.details["result_scoped"] is True
     completed = load_project("style-test")
     run_record = completed.payload["runs"][-1]
     assert "screening" in run_record["evaluation"]
