@@ -8,7 +8,6 @@ from typing import Any, Mapping
 from .config import resolve_profiles, stable_hash, write_json_atomic
 from .models import PipelineError, StepResult
 from .prepared import load_current_generation
-from .target_dataset_diagnostics import target_dataset_diagnostics
 from .target_training_advisor import target_training_advice
 
 
@@ -19,7 +18,7 @@ _DEFAULT_STYLE_LIMITS = {
 
 
 def install_target_preflight_hook(preflight_module: ModuleType) -> None:
-    """Add target-aware advisory/guardrails without replacing core preflight logic."""
+    """Add target-aware training advice and the style-only bias guardrail."""
 
     original = preflight_module.run
     if getattr(original, "_target_preflight_wrapped", False):
@@ -81,7 +80,6 @@ def _augment_preflight_report(state, report: dict[str, Any]) -> None:
     )
 
     caption_manifest = _caption_manifest(state)
-    caption_records = list(caption_manifest.get("records", [])) if caption_manifest else []
     image_count = _prepared_image_count(state)
     style_distribution = (
         dict(caption_manifest.get("style_distribution") or {})
@@ -103,16 +101,9 @@ def _augment_preflight_report(state, report: dict[str, Any]) -> None:
     for warning in advice.get("warnings", []):
         _append_unique(warnings, "Target training advisory: " + str(warning))
 
-    diagnostics = target_dataset_diagnostics(
-        target_type,
-        caption_records=caption_records,
-        dataset_semantics=project.get("dataset_semantics_snapshot", {}),
-        limits=profiles.merged.get("limits", {}).get("target_dataset", {}),
-    )
-    checks["target_dataset_diagnostics"] = diagnostics
-    for warning in diagnostics.get("warnings", []):
-        _append_unique(warnings, "Target dataset diagnostic: " + str(warning))
-
+    # Character and character-outfit data are user-curated by contract. Preflight
+    # no longer guesses identity/outfit correctness or emits acquisition/diversity
+    # warnings from Dataset semantic metadata.
     if target_type != "style":
         return
 
@@ -133,12 +124,7 @@ def assess_style_distribution(
     *,
     limits: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assess style-only subject/composition entanglement risk.
-
-    A single concentrated axis is a warning. Blocking requires both an extremely
-    concentrated subject and an extremely concentrated portrait/background axis,
-    which is much stronger evidence that the requested target is not separable style.
-    """
+    """Assess severe style/content entanglement risk without scoring aesthetics."""
 
     configured = {**_DEFAULT_STYLE_LIMITS, **dict(limits or {})}
     minimum_images = max(1, int(configured["minimum_images"]))

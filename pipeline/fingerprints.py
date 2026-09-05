@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 8
+FINGERPRINT_VERSION = 9
 TRAINING_PROFILE_KEYS = (
     "precision",
     "attention",
@@ -83,7 +83,6 @@ def compute_step_signature(
                 "trigger": project.get("trigger"),
                 "trigger_policy": project.get("trigger_policy", {}),
                 "caption_anchor_tags": project.get("caption_anchor_tags", []),
-                "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
                 "raw_images": _raw_images(state),
                 "raw_captions": _raw_captions(state),
                 "exclusions": _hash_optional(state.project_dir / "review" / "exclusions.yaml"),

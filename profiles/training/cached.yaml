@@ -19,7 +19,6 @@ training:
   state_retention: latest
 caption:
   shuffle: false
-  keep_tokens: 1
   dropout_rate: 0
   tag_dropout_rate: 0
   token_warmup_step: 0
