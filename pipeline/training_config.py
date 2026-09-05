@@ -16,6 +16,7 @@ from .config import (
 from .dataset_workspace import DatasetWorkspace, create_project_from_dataset
 from .models import PipelineError, StateError
 from .state import ProjectState, utc_now
+from .trigger_policy import TRIGGER_STRATEGIES, resolve_trigger_policy
 
 
 _CONFIG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -53,14 +54,17 @@ _CHARACTER_OUTFIT_EVALUATION = {
 
 
 def default_workflow(concept_type: str) -> dict[str, Any]:
+    del concept_type
     return {
-        "run_dedup": True,
+        # Legacy curation utilities remain callable for old workspaces, but the
+        # normal contract assumes input identity is already correct. Training only
+        # needs materialization/captioning, preflight and train.
+        "run_dedup": False,
         "exclude_exact_duplicates": False,
-        "run_identity": concept_type == "character",
+        "run_identity": False,
         "caption_mode": "auto",
         "allow_trigger_only": False,
-        "run_review": True,
-        # Evaluation belongs to the Results area in the four-part UI.
+        "run_review": False,
         "run_screening_evaluation": False,
     }
 
@@ -106,12 +110,7 @@ def _normalize_prompt_tag(value: str) -> str:
 
 
 class TrainingConfig:
-    """A mutable, reusable recipe for creating immutable training runs.
-
-    Dataset/Project concept types stay intentionally broad (character/style).
-    ``target_type`` can specialize a Character recipe, for example an outfit LoRA,
-    without forcing every runtime pipeline component to learn another concept type.
-    """
+    """A mutable, reusable recipe for creating immutable training runs."""
 
     def __init__(self, path: Path, payload: dict[str, Any]):
         self.path = path
@@ -128,6 +127,7 @@ class TrainingConfig:
         trigger: str,
         target_type: str | None = None,
         anchor_tags: Sequence[str] = (),
+        trigger_strategy: str = "explicit",
         strategy: str = "quality",
         images_seen: int = 1000,
         hardware: str = "v100_16gb",
@@ -144,6 +144,12 @@ class TrainingConfig:
             raise PipelineError(f"Base model is not registered and enabled: {base}")
         now = utc_now()
         resolved_target = str(target_type or concept_type)
+        anchors = parse_anchor_tags(anchor_tags)
+        policy = resolve_trigger_policy(
+            trigger,
+            strategy=trigger_strategy,
+            anchors=anchors,
+        )
         payload = {
             "schema_version": 1,
             "config": {
@@ -151,8 +157,10 @@ class TrainingConfig:
                 "concept_type": concept_type,
                 "target_type": resolved_target,
                 "base": base,
-                "trigger": trigger.strip(),
-                "anchor_tags": parse_anchor_tags(anchor_tags),
+                "trigger": policy.trigger,
+                "trigger_strategy": policy.strategy,
+                "trigger_requested": policy.requested,
+                "anchor_tags": anchors,
                 "strategy": strategy,
                 "images_seen": int(images_seen),
                 "hardware": hardware,
@@ -174,6 +182,7 @@ class TrainingConfig:
 
     @classmethod
     def load(cls, name: str, *, root: Path | None = None) -> "TrainingConfig":
+        path = training_config_path(name, root=root) / Path("")
         path = training_config_path(name, root=root)
         if not path.is_file():
             raise StateError(f"Training config does not exist: {name}")
@@ -204,6 +213,10 @@ class TrainingConfig:
         return str(self.data["trigger"])
 
     @property
+    def trigger_strategy(self) -> str:
+        return str(self.data.get("trigger_strategy", "explicit"))
+
+    @property
     def anchor_tags(self) -> list[str]:
         return list(self.data.get("anchor_tags", []))
 
@@ -227,9 +240,15 @@ class TrainingConfig:
     def evaluation(self) -> dict[str, Any]:
         return self.data["evaluation"]
 
-    def runtime_overrides(self) -> dict[str, Any]:
-        """Return target-aware profile overrides without mutating user overrides."""
+    @property
+    def trigger_policy(self) -> dict[str, object]:
+        return resolve_trigger_policy(
+            str(self.data.get("trigger_requested") or self.trigger),
+            strategy=self.trigger_strategy,
+            anchors=self.anchor_tags,
+        ).as_dict()
 
+    def runtime_overrides(self) -> dict[str, Any]:
         target_defaults: dict[str, Any] = {}
         if self.target_type == "character_outfit":
             target_defaults = {
@@ -239,8 +258,6 @@ class TrainingConfig:
         return deep_merge(target_defaults, self.overrides)
 
     def effective_evaluation(self) -> dict[str, Any]:
-        """Resolve the run-time evaluation subject for the selected training target."""
-
         result = copy.deepcopy(self.evaluation)
         if self.target_type == "character_outfit":
             subject = str(result.get("subject_prompt") or "1girl")
@@ -254,6 +271,8 @@ class TrainingConfig:
         concept = str(data.get("concept_type") or "character")
         data.setdefault("target_type", concept)
         data["anchor_tags"] = parse_anchor_tags(data.get("anchor_tags", []))
+        data.setdefault("trigger_strategy", "explicit")
+        data.setdefault("trigger_requested", data.get("trigger", ""))
         data.setdefault("hardware", "v100_16gb")
         data.setdefault("strategy", "quality")
         data.setdefault("images_seen", 1000)
@@ -285,6 +304,11 @@ class TrainingConfig:
         trigger = str(data.get("trigger") or "").strip()
         if not trigger or "," in trigger:
             raise PipelineError("Training config trigger must be non-empty and cannot contain a comma")
+        trigger_strategy = str(data.get("trigger_strategy") or "explicit")
+        if trigger_strategy not in TRIGGER_STRATEGIES:
+            raise PipelineError(
+                "Trigger strategy must be one of: " + ", ".join(TRIGGER_STRATEGIES)
+            )
 
         anchors = parse_anchor_tags(data.get("anchor_tags", []))
         if target_type == "character_outfit" and not anchors:
@@ -293,6 +317,13 @@ class TrainingConfig:
             )
         if target_type != "character_outfit" and anchors:
             raise PipelineError("Anchor tags are only valid for character_outfit training")
+        if trigger_strategy == "multi_anchor" and target_type != "character_outfit":
+            raise PipelineError("multi_anchor trigger strategy is only valid for character_outfit training")
+        resolve_trigger_policy(
+            str(data.get("trigger_requested") or trigger),
+            strategy=trigger_strategy,
+            anchors=anchors,
+        )
         trigger_normalized = _normalize_prompt_tag(trigger)
         if any(_normalize_prompt_tag(anchor) == trigger_normalized for anchor in anchors):
             raise PipelineError("Character anchor tags must not repeat the LoRA trigger")
@@ -320,9 +351,6 @@ class TrainingConfig:
         write_yaml_atomic(self.path, self.payload)
 
     def snapshot(self) -> dict[str, Any]:
-        data = copy.deepcopy(self.data)
-        data.pop("created_at", None)
-        data.pop("updated_at", None)
         basis = {
             "schema_version": 1,
             "name": self.name,
@@ -330,6 +358,8 @@ class TrainingConfig:
             "target_type": self.target_type,
             "base": self.base,
             "trigger": self.trigger,
+            "trigger_strategy": self.trigger_strategy,
+            "trigger_policy": self.trigger_policy,
             "anchor_tags": self.anchor_tags,
             "strategy": self.strategy,
             "images_seen": self.images_seen,
@@ -375,8 +405,6 @@ def create_project_from_training_config(
     project_name: str,
     root: Path | None = None,
 ) -> ProjectState:
-    """Freeze Dataset + TrainingConfig into an internal Project run workspace."""
-
     config.validate(require_enabled_base=True, root=root)
     if workspace.concept_type != config.concept_type:
         raise PipelineError(
@@ -397,6 +425,8 @@ def create_project_from_training_config(
     project["workspace_role"] = "training_run"
     project["training_config_snapshot"] = snapshot
     project["training_target_type"] = config.target_type
+    project["trigger_strategy"] = config.trigger_strategy
+    project["trigger_policy"] = config.trigger_policy
     project["caption_anchor_tags"] = config.anchor_tags
     project["overrides"] = config.runtime_overrides()
     project["evaluation"] = config.effective_evaluation()
@@ -409,10 +439,10 @@ def create_project_from_training_config(
             if dataset_snapshot.get("caption_count") == dataset_snapshot.get("image_count")
             else "generate"
         )
-    # The Results area owns evaluation in the four-part UI.
     workflow["run_screening_evaluation"] = False
-    if state.concept_type != "character":
-        workflow["run_identity"] = False
+    workflow["run_identity"] = False
+    workflow["run_dedup"] = False
+    workflow["run_review"] = False
     project["interactive_preferences"] = workflow
     project["training_identity"] = {
         "dataset": workspace.name,
