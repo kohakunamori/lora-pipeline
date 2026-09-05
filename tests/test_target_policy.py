@@ -108,16 +108,18 @@ def test_character_outfit_policy_keeps_training_trigger_owner(tmp_path: Path) ->
     assert project["semantic_caption_policy"]["invariant_outfit_tags"] == "suppress"
 
 
-def test_character_policy_preserves_existing_dataset_token_behavior(tmp_path: Path) -> None:
+def test_character_policy_keeps_training_config_trigger_owner(tmp_path: Path) -> None:
     workspace = _Workspace(tmp_path)
     state = _State(tmp_path, target_type="character")
 
     attach_target_aware_dataset_semantics_snapshot(state, workspace)
 
     project = state.payload["project"]
-    assert project["trigger"] == "misuzu_demo"
-    assert project["training_config_trigger"] == "misuzu_swimsuit"
+    assert project["trigger"] == "misuzu_swimsuit"
+    assert project["trigger_source"] == "training_config"
+    assert "training_config_trigger" not in project
     assert project["semantic_caption_policy"] == target_caption_policy("character")
+    assert project["semantic_caption_policy"]["character_token"] == "do_not_inject"
 
 
 def test_outfit_runtime_suppresses_manual_and_invariant_garment_tags(tmp_path: Path) -> None:
