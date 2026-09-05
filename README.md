@@ -1,24 +1,47 @@
 # LoRA Pipeline
 
-A resumable, interactive command-line pipeline for Character and Style LoRA
-training on local Illustrious/SDXL checkpoints. Training is delegated to a
-pinned [`sd-scripts`](https://github.com/kohya-ss/sd-scripts) checkout; this
-repository does not implement a custom SDXL training loop.
+A resumable, interactive pipeline for Character and Style LoRA training on local
+Illustrious/SDXL checkpoints. Training is delegated to a pinned
+[`sd-scripts`](https://github.com/kohya-ss/sd-scripts) checkout; this repository
+does not implement a custom SDXL training loop.
 
 The bundled hardware profile targets a 16 GB NVIDIA V100 (`sm_70`) with FP16,
 PyTorch SDPA, 1024-area buckets, and profile-driven dataloader settings. The
 pipeline does not install, upgrade, or calibrate PyTorch, CUDA, NVIDIA drivers,
 or `sd-scripts`. Those are deployment responsibilities.
 
+## Architecture
+
+The workflow is deliberately split into three lifecycles:
+
+```text
+Dataset Workspace                Training Project                 Results
+-----------------                ----------------                 -------
+import / video ingest     ->      prepare (materialize)    ->      screening
+inspect / audit                   preflight                       full evaluation
+dedup / identity                 train                           human promote
+tag / edit / exclude
+        |
+        +-- immutable Dataset snapshot + TrainingConfig snapshot
+```
+
+Dataset curation is not replayed as a Project training state machine. A Project
+freezes the selected dataset/config inputs, materializes the effective training
+captions and images, validates them, and trains. Evaluation is a repeatable
+operation on a completed run and is not required for the training lifecycle to
+be considered complete.
+
 ## Design guarantees
 
 - Files under `projects/*/raw/` are never modified or deleted by the pipeline.
+- Dataset inspection/curation belongs to `DatasetWorkspace`; frozen Projects do
+  not normally rerun inspect, duplicate, identity, or review stages.
 - Prepared datasets are immutable, content-addressed generations under
   `prepared/generations/<manifest-hash>/`.
-- A completed step is reused only when its effective input fingerprint still
-  matches. Input changes invalidate only dependent downstream steps.
+- A completed training stage is reused only when its effective input fingerprint
+  still matches. Input changes invalidate only dependent downstream stages.
 - Character and Style are separate concept profiles. CCIP identity logic does
-  not run for Style projects.
+  not run for Style datasets.
 - Training budget is expressed canonically as `images_seen`, so Quality batch 1
   and Fast batch 2 are compared at equal image exposure rather than equal step
   count.
@@ -60,15 +83,20 @@ The registry caches a full SHA256 together with a file stat signature. If the
 checkpoint content changes, preflight blocks instead of silently accepting the
 new file under the old base identity.
 
-## Create a project
+## Dataset curation
 
-Interactive:
+The preferred workflow is to curate reusable data in a Dataset Workspace before
+creating a training run. Import sources, audit images, resolve duplicates and
+character identity issues where applicable, generate/edit captions, and exclude
+bad samples there. Video extraction and identity selection also terminate in the
+Dataset layer rather than becoming Project training stages.
 
-```bash
-./lora new
-```
+A Dataset snapshot records the active image set, hashes, captions, inspection
+metadata, and reusable curation analyses. Creating a Project from that Dataset
+freezes the snapshot so later Dataset edits do not silently change an existing
+training run.
 
-Non-interactive:
+Legacy direct Project creation remains available for compatibility:
 
 ```bash
 ./lora new \
@@ -82,47 +110,56 @@ Non-interactive:
   --yes
 ```
 
+For this path, image inspection is frozen when the Project raw snapshot is
+created; it is no longer replayed by `./lora run`.
+
 A project contains:
 
 ```text
 projects/<name>/
-├── raw/                         # immutable user input
+├── raw/                         # immutable frozen input
 ├── validation/                  # optional holdout images; never trained
 ├── prepared/
 │   ├── current.json
-│   └── generations/<hash>/      # immutable image/caption generation
-├── review/
+│   └── generations/<hash>/      # immutable effective image/caption generation
+├── review/                      # compatibility/review artifacts
 ├── cache/
 ├── runs/
 └── project.yaml
 ```
 
-## Caption modes
+## Caption materialization
 
-Caption handling is explicit:
+Caption generation and normalization are inputs to materialization, not a
+separate Project lifecycle stage. Guided training supplies the selected caption
+policy to `prepare`, which writes the effective captions into the immutable
+prepared generation.
 
-```bash
-./lora caption PROJECT --mode generate
-./lora caption PROJECT --mode existing_passthrough
-./lora caption PROJECT --mode existing_taglist_clean
-./lora caption PROJECT --mode hybrid
-./lora caption PROJECT --mode skip
-```
+Supported policies remain:
 
 - `generate`: tag with the configured anime tagger and apply concept policy.
-- `existing_passthrough`: preserve existing `.txt` bytes through preparation.
-- `existing_taglist_clean`: explicitly treat existing captions as Booru tag
-  lists and normalize them.
+- `existing_passthrough`: preserve existing `.txt` bytes.
+- `existing_taglist_clean`: treat existing captions as Booru tag lists and
+  normalize them.
 - `hybrid`: keep existing content and add tagger suggestions; conflicts are
-  written to review manifests.
-- `skip`: use existing sidecars during preparation without running the caption
-  step.
+  recorded as review artifacts.
+- `skip`: use raw sidecars without running a caption transform.
+
+The explicit legacy utility remains available for diagnostics or migration:
+
+```bash
+./lora caption PROJECT --mode existing_taglist_clean
+```
+
+It is not a prerequisite state for `prepare`. `prepare` fingerprints the raw
+images/captions and effective caption policy directly, so changing only the
+legacy caption-step record does not invalidate an otherwise identical prepared
+training set.
 
 Raw tagger outputs are cached by image content plus backend/model configuration,
-so adding or changing one image does not retag the entire dataset. Character tag
-outputs are also used to flag possible mixed-character images for review.
+so adding or changing one image does not retag the entire dataset.
 
-Missing captions block preparation by default. Trigger-only fallback must be
+Missing captions block materialization by default. Trigger-only fallback must be
 explicit:
 
 ```bash
@@ -131,32 +168,35 @@ explicit:
 
 This is recorded as a high-risk strategy in manifests and preflight output.
 
-## Interactive and resumable workflow
+## Training lifecycle
 
-```bash
-./lora open PROJECT
+The normal Project training state machine is intentionally small:
+
+```text
+prepare -> preflight -> train
 ```
 
-The wizard offers Run, Review, or Skip for optional stages while calling the
-same service functions as the non-interactive CLI. A typical explicit flow is:
+`prepare` is the current compatibility name for the materialization stage. It
+combines the frozen Dataset snapshot with the TrainingConfig-specific trigger,
+anchors and caption policy, then writes a content-addressed prepared generation.
+
+Run all remaining training stages with:
 
 ```bash
-./lora inspect PROJECT
-./lora dedup PROJECT
-./lora identity PROJECT                 # Character only
-./lora caption PROJECT --mode generate
-./lora review PROJECT
+./lora run PROJECT --caption-mode existing_taglist_clean
+```
+
+Or invoke the stages explicitly:
+
+```bash
 ./lora prepare PROJECT
 ./lora preflight PROJECT
 ./lora train PROJECT
-./lora evaluate PROJECT --stage screening
 ```
 
-Or run the remaining stages:
-
-```bash
-./lora run PROJECT --caption-mode generate
-```
+`inspect`, `dedup`, `identity`, `caption`, and `review` records may still exist
+inside old Projects for migration compatibility, but normal run orchestration and
+Project navigation do not replay them.
 
 Project state is written atomically. Interrupting a long training command records
 `interrupted`; when `sd-scripts` saved state exists, resume the same run:
@@ -165,7 +205,7 @@ Project state is written atomically. Interrupting a long training command record
 ./lora train PROJECT --resume RUN_ID
 ```
 
-`--force-step` reruns a step. `--break-lock` is deliberately separate and only
+`--force-step` reruns a stage. `--break-lock` is deliberately separate and only
 breaks a lock proven stale on the current host. A live process lock cannot be
 overridden.
 
@@ -182,7 +222,8 @@ Preflight checks:
 - resolved `images_seen`, optimizer steps, effective batch, and equivalent
   epochs;
 - persistent and optional scratch storage writability/free space;
-- unresolved duplicate and identity review items.
+- inherited Dataset curation warnings and target-specific guardrails where
+  available.
 
 If tokenizer assets are not locally cached, preflight reports a clearly marked
 heuristic fallback. Cache both SDXL tokenizers and rerun preflight before relying
@@ -224,9 +265,10 @@ storage:
 Set `scratch_root` only after validating a local SSD/NVMe path on the NAS. Logs
 and checkpoints are synchronized back to persistent project storage.
 
-## Evaluation and promotion
+## Results: evaluation and promotion
 
-Evaluation is intentionally two-stage.
+Evaluation is intentionally outside the training state machine. A completed run
+can be evaluated repeatedly without reopening or invalidating training.
 
 ### 1. Screening
 

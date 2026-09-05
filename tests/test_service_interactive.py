@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline import service
-from pipeline.models import STEP_NAMES, StepResult, StepStatus
+from pipeline.models import PROJECT_RUN_STEPS, StepResult, StepStatus
 
 
 class FakeState:
@@ -16,7 +16,7 @@ class FakeState:
         return StepStatus.PENDING
 
 
-def test_run_remaining_forwards_resume_and_emits_step_callbacks(monkeypatch) -> None:
+def test_run_remaining_forwards_resume_and_emits_only_training_callbacks(monkeypatch) -> None:
     state = FakeState()
     calls: list[tuple[str, object]] = []
     callbacks: list[str] = []
@@ -35,12 +35,15 @@ def test_run_remaining_forwards_resume_and_emits_step_callbacks(monkeypatch) -> 
     )
 
     assert results == []
-    assert callbacks == list(STEP_NAMES)
+    assert callbacks == list(PROJECT_RUN_STEPS)
     assert dict(calls)["train"] == "run-interrupted"
     assert all(resume is None for step, resume in calls if step != "train")
+    assert {"inspect", "dedup", "identity", "caption", "review", "evaluate"}.isdisjoint(
+        dict(calls)
+    )
 
 
-def test_dry_run_preview_of_a_skipped_step_has_no_side_effect(monkeypatch) -> None:
+def test_dry_run_preflight_bypass_has_no_side_effect(monkeypatch) -> None:
     state = FakeState()
     monkeypatch.setattr(service.ProjectState, "load", lambda path: state)
     monkeypatch.setattr(
@@ -50,15 +53,15 @@ def test_dry_run_preview_of_a_skipped_step_has_no_side_effect(monkeypatch) -> No
     )
     monkeypatch.setattr(
         service,
-        "skip_optional_step",
+        "skip_preflight_step",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not persist")),
     )
 
-    results = service.run_remaining(state, skip={"dedup"}, dry_run=True)
+    results = service.run_remaining(state, skip_preflight=True, dry_run=True)
 
     assert len(results) == 1
     step, result = results[0]
-    assert step == "dedup"
+    assert step == "preflight"
     assert result.status is StepStatus.SKIPPED
     assert result.details["dry_run"] is True
-    assert result.details["would_skip"] == "dedup"
+    assert result.details["would_skip"] == "preflight"

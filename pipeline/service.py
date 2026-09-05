@@ -5,11 +5,19 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import load_base_registry, repository_root
-from .dataset.image_info import discover_images
+from .config import load_base_registry, repository_root, write_json_atomic
+from .dataset.image_info import discover_images, inspect_dataset
 from .evaluation.generation import GenerationBackend
 from .fingerprints import compute_step_signature
-from .models import OPTIONAL_STEPS, STEP_NAMES, PipelineError, StateError, StepResult, StepStatus
+from .models import (
+    ALL_STEP_NAMES,
+    OPTIONAL_STEPS,
+    PROJECT_RUN_STEPS,
+    PipelineError,
+    StateError,
+    StepResult,
+    StepStatus,
+)
 from .state import ProjectState, execute_step, project_lock
 from .steps import caption, dedup, evaluate, identity, inspect, preflight, prepare, review, train
 from .trainer.base import TrainerBackend
@@ -80,6 +88,23 @@ def create_project(
         state.payload["project"]["import_error"] = f"{type(exc).__name__}: {exc}"
         state.save()
         raise
+
+    # Inspection is a dataset import invariant, not a training-run stage. Freeze
+    # it immediately beside the immutable Project raw snapshot so Preflight and
+    # legacy readers still consume the same manifest without replaying `inspect`
+    # during every Project run.
+    inspection = inspect_dataset(destination / "raw")
+    inspection_path = destination / "dataset-manifest.json"
+    write_json_atomic(inspection_path, inspection)
+    state.payload["steps"]["inspect"] = {
+        "status": StepStatus.SKIPPED.value,
+        "attempts": 0,
+        "reason": "inspection frozen when the Project raw snapshot was created",
+        "permanent": True,
+        "input_hash": str(inspection["input_hash"]),
+        "output_manifest": str(inspection_path),
+        "details": dict(inspection["summary"]),
+    }
     state.payload["project"].update(
         {
             "budget": {"unit": "images_seen", "value": images_seen},
@@ -105,7 +130,7 @@ def run_single_step(
     break_lock: bool = False,
     dry_run: bool = False,
     verbose: int = 0,
-    caption_mode: str = "generate",
+    caption_mode: str | None = None,
     exclude_exact: bool = False,
     exclusions: list[str] | None = None,
     allow_trigger_only: bool | None = None,
@@ -118,7 +143,7 @@ def run_single_step(
     trainer_backend: TrainerBackend | None = None,
     generation_backend: GenerationBackend | None = None,
 ) -> StepResult:
-    if name not in STEP_NAMES:
+    if name not in ALL_STEP_NAMES:
         raise StateError(f"Unknown step: {name}")
     options = _step_options(
         name,
@@ -173,11 +198,15 @@ def run_single_step(
         elif name == "identity":
             handler = lambda: identity.run(state)
         elif name == "caption":
-            handler = lambda: caption.run(state, mode=caption_mode)
+            handler = lambda: caption.run(state, mode=caption_mode or "generate")
         elif name == "review":
             handler = lambda: review.run(state, exclude=exclusions)
         elif name == "prepare":
-            handler = lambda: prepare.run(state, allow_trigger_only=allow_trigger_only)
+            handler = lambda: prepare.run(
+                state,
+                allow_trigger_only=allow_trigger_only,
+                caption_mode=caption_mode,
+            )
         elif name == "preflight":
             handler = lambda: preflight.run(state)
         elif name == "train":
@@ -223,9 +252,11 @@ def run_remaining(
     invalid = skip - OPTIONAL_STEPS
     if invalid:
         raise PipelineError("These steps cannot be skipped: " + ", ".join(sorted(invalid)))
+    if "caption" in skip:
+        caption_mode = "skip"
     results: list[tuple[str, StepResult]] = []
     can_break = break_lock
-    for name in STEP_NAMES:
+    for name in PROJECT_RUN_STEPS:
         state = ProjectState.load(state.project_dir)
         if state.step(name).get("permanent") and state.status(name) is StepStatus.SKIPPED:
             continue
@@ -342,11 +373,14 @@ def _step_options(name: str, **values: Any) -> dict[str, Any]:
     if name == "dedup":
         return {"exclude_exact": values.get("exclude_exact", False)}
     if name == "caption":
-        return {"mode": values.get("caption_mode", "generate")}
+        return {"mode": values.get("caption_mode") or "generate"}
     if name == "review":
         return {"exclusions": sorted(values.get("exclusions") or [])}
     if name == "prepare":
-        return {"allow_trigger_only": values.get("allow_trigger_only")}
+        return {
+            "allow_trigger_only": values.get("allow_trigger_only"),
+            "caption_mode": values.get("caption_mode"),
+        }
     if name == "train":
         return {
             "images_seen_override": values.get("images_seen"),

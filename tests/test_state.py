@@ -39,10 +39,11 @@ def test_state_reuses_only_matching_fingerprint(tmp_path) -> None:
     assert reloaded.step("inspect")["input_hash"] == "raw-v2"
 
 
-def test_changed_upstream_fingerprint_invalidates_downstream(tmp_path) -> None:
+def test_changed_caption_utility_invalidates_only_legacy_review(tmp_path) -> None:
     state = _project(tmp_path)
     execute_step(state, "inspect", lambda: StepResult(), input_hash="raw-v1")
     execute_step(state, "caption", lambda: StepResult(), input_hash="caption-v1")
+    execute_step(state, "review", lambda: StepResult(), input_hash="review-v1")
     execute_step(state, "prepare", lambda: StepResult(), input_hash="prepare-v1")
     execute_step(state, "preflight", lambda: StepResult(), input_hash="preflight-v1")
     execute_step(state, "train", lambda: StepResult(), input_hash="train-v1")
@@ -52,9 +53,14 @@ def test_changed_upstream_fingerprint_invalidates_downstream(tmp_path) -> None:
     reloaded = ProjectState.load(state.project_dir)
     assert reloaded.status("inspect") is StepStatus.DONE
     assert reloaded.status("caption") is StepStatus.DONE
-    for name in ("review", "prepare", "preflight", "train", "evaluate"):
-        assert reloaded.status(name) is StepStatus.PENDING
-        assert "caption" in reloaded.step(name)["invalidation_reason"]
+    assert reloaded.status("review") is StepStatus.PENDING
+    assert "caption" in reloaded.step("review")["invalidation_reason"]
+
+    # Materialization fingerprints the raw images/captions and effective caption
+    # policy directly, so changing a compatibility caption-step record must not
+    # invalidate the independent training lifecycle.
+    for name in ("prepare", "preflight", "train", "evaluate"):
+        assert reloaded.status(name) is StepStatus.DONE
 
 
 def test_style_identity_is_permanently_n_a(tmp_path) -> None:

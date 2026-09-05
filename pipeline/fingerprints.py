@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from .config import load_base_registry, resolve_profiles, sha256_file, stable_hash
 from .dataset.image_info import discover_images
-from .models import STEP_NAMES, PipelineError
+from .models import ALL_STEP_NAMES, PipelineError
 from .prepared import load_current_generation
 
 if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 6
+FINGERPRINT_VERSION = 7
 TRAINING_PROFILE_KEYS = (
     "precision",
     "attention",
@@ -33,7 +33,7 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "identity": ("inspect",),
     "caption": ("inspect",),
     "review": ("dedup", "identity", "caption"),
-    "prepare": ("inspect", "review", "caption"),
+    "prepare": (),
     "preflight": ("prepare",),
     "train": ("preflight", "prepare"),
     "evaluate": ("train",),
@@ -41,14 +41,14 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 
 
 def downstream_steps(name: str) -> tuple[str, ...]:
-    if name not in STEP_NAMES:
+    if name not in ALL_STEP_NAMES:
         raise PipelineError(f"Unknown step: {name}")
-    reverse: dict[str, set[str]] = {step: set() for step in STEP_NAMES}
+    reverse: dict[str, set[str]] = {step: set() for step in ALL_STEP_NAMES}
     for step, dependencies in STEP_DEPENDENCIES.items():
         for dependency in dependencies:
             reverse[dependency].add(step)
     discovered: list[str] = []
-    queue: deque[str] = deque(sorted(reverse[name], key=STEP_NAMES.index))
+    queue: deque[str] = deque(sorted(reverse[name], key=ALL_STEP_NAMES.index))
     seen: set[str] = set()
     while queue:
         step = queue.popleft()
@@ -56,8 +56,8 @@ def downstream_steps(name: str) -> tuple[str, ...]:
             continue
         seen.add(step)
         discovered.append(step)
-        queue.extend(sorted(reverse[step], key=STEP_NAMES.index))
-    return tuple(sorted(discovered, key=STEP_NAMES.index))
+        queue.extend(sorted(reverse[step], key=ALL_STEP_NAMES.index))
+    return tuple(sorted(discovered, key=ALL_STEP_NAMES.index))
 
 
 def compute_step_signature(
@@ -68,7 +68,7 @@ def compute_step_signature(
 ) -> str:
     """Hash only the effective inputs that decide whether a step is reusable."""
 
-    if name not in STEP_NAMES:
+    if name not in ALL_STEP_NAMES:
         raise PipelineError(f"Unknown step: {name}")
     options = dict(options or {})
     project = state.payload["project"]
@@ -91,10 +91,13 @@ def compute_step_signature(
         payload.update(
             {
                 "concept_type": project.get("type"),
+                "training_target_type": project.get("training_target_type", project.get("type")),
                 "trigger": project.get("trigger"),
+                "caption_anchor_tags": project.get("caption_anchor_tags", []),
+                "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
                 "raw_images": _raw_images(state),
                 "raw_captions": _raw_captions(state),
-                "caption_profile": profiles.concept.get("caption", {}),
+                "caption_profile": profiles.merged.get("caption", {}),
                 "tagger_profile": profiles.concept.get("tagger", {}),
                 "token_budget": profiles.merged.get("caption", {}).get(
                     "max_token_length",
@@ -112,17 +115,33 @@ def compute_step_signature(
             state.project_dir / "review" / "exclusions.yaml"
         )
     elif name == "prepare":
+        profiles = _profiles(state)
         payload.update(
             {
+                "concept_type": project.get("type"),
+                "training_target_type": project.get("training_target_type", project.get("type")),
                 "trigger": project.get("trigger"),
+                "caption_anchor_tags": project.get("caption_anchor_tags", []),
+                "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
                 "raw_images": _raw_images(state),
                 "raw_captions": _raw_captions(state),
-                "caption": _step_output_fingerprint(state, "caption"),
                 "exclusions": _hash_optional(
                     state.project_dir / "review" / "exclusions.yaml"
                 ),
-                "caption_mode": project.get("caption_mode"),
-                "allow_trigger_only": bool(project.get("allow_trigger_only", False)),
+                "caption_mode": _effective_caption_mode(project, options.get("caption_mode")),
+                "caption_profile": profiles.merged.get("caption", {}),
+                "tagger_profile": profiles.concept.get("tagger", {}),
+                "token_budget": profiles.merged.get("caption", {}).get(
+                    "max_token_length",
+                    profiles.hardware.get("caption", {}).get(
+                        "default_max_token_length", 75
+                    ),
+                ),
+                "allow_trigger_only": (
+                    bool(options["allow_trigger_only"])
+                    if options.get("allow_trigger_only") is not None
+                    else bool(project.get("allow_trigger_only", False))
+                ),
             }
         )
     elif name in {"preflight", "train"}:
@@ -153,6 +172,22 @@ def compute_step_signature(
             }
         )
     return stable_hash(payload)
+
+
+def _effective_caption_mode(project: Mapping[str, Any], requested: Any) -> str:
+    # Match prepare._resolve_caption_mode: guided training passes the mode
+    # explicitly; direct materialization must not inherit interactive workflow
+    # preferences and accidentally start an optional tagger backend.
+    mode = str(requested or project.get("caption_mode") or "skip")
+    if mode != "auto":
+        return mode
+    snapshot = project.get("dataset_snapshot", {})
+    if isinstance(snapshot, Mapping):
+        image_count = int(snapshot.get("image_count", 0) or 0)
+        caption_count = int(snapshot.get("caption_count", 0) or 0)
+        if image_count > 0 and caption_count == image_count:
+            return "existing_taglist_clean"
+    return "generate"
 
 
 def _training_profile_slice(merged: Mapping[str, Any]) -> dict[str, Any]:

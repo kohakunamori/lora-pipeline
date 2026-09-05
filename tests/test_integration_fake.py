@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 from pipeline.config import repository_root, sha256_file, write_json_atomic
 from pipeline.evaluation.generation import GenerationBackend
 from pipeline.models import GeneratedImage, GenerationCase, TrainingRequest, TrainingResult
-from pipeline.service import create_project, load_project, run_remaining
+from pipeline.service import create_project, load_project, run_remaining, run_single_step
 from pipeline.state import ProjectState, project_lock
 from pipeline.steps import preflight as preflight_step
 from pipeline.steps import promote
@@ -144,19 +144,26 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
         generation_backend=FakeGenerator(),
     )
     assert [name for name, _ in results] == [
-        "inspect",
-        "dedup",
-        "caption",
-        "review",
         "prepare",
         "preflight",
         "train",
-        "evaluate",
     ]
+    assert results[0][1].details["caption_mode"] == "skip"
     completed = load_project("style-test")
     assert completed.next_actionable_step() is None
-    for step_name in ("inspect", "prepare", "preflight", "train", "evaluate"):
+    for step_name in ("inspect", "prepare", "preflight", "train"):
         assert completed.step(step_name).get("input_hash"), step_name
+
+    run_id = str(completed.payload["runs"][-1]["id"])
+    run_single_step(
+        completed,
+        "evaluate",
+        generation_backend=FakeGenerator(),
+        evaluation_run=run_id,
+    )
+    completed = load_project("style-test")
+    assert completed.step("evaluate").get("input_hash")
+
     raw_after = {
         path.name: sha256_file(path) for path in (state.project_dir / "raw").glob("*.png")
     }

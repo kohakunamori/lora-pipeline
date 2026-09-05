@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import read_yaml, write_yaml_atomic
-from .models import STEP_NAMES, StateError, StepResult, StepStatus
+from .models import ALL_STEP_NAMES, PROJECT_RUN_STEPS, StateError, StepResult, StepStatus
 
 
 def utc_now() -> str:
@@ -60,7 +60,7 @@ class ProjectState:
                 "overrides": {},
                 "allow_trigger_only": False,
             },
-            "steps": {step: {"status": StepStatus.PENDING.value, "attempts": 0} for step in STEP_NAMES},
+            "steps": {step: {"status": StepStatus.PENDING.value, "attempts": 0} for step in ALL_STEP_NAMES},
             "runs": [],
         }
         if concept_type == "style":
@@ -110,7 +110,7 @@ class ProjectState:
         if "unit" not in budget and "optimizer_steps" in budget:
             budget["unit"] = "legacy_optimizer_steps"
             budget["value"] = int(budget["optimizer_steps"])
-        for step in STEP_NAMES:
+        for step in ALL_STEP_NAMES:
             steps.setdefault(step, {"status": StepStatus.PENDING.value, "attempts": 0})
             status = steps[step].get("status", StepStatus.PENDING.value)
             try:
@@ -125,7 +125,7 @@ class ProjectState:
         write_yaml_atomic(self.path, self.payload)
 
     def step(self, name: str) -> dict[str, Any]:
-        if name not in STEP_NAMES:
+        if name not in ALL_STEP_NAMES:
             raise StateError(f"Unknown step: {name}")
         return self.payload["steps"][name]
 
@@ -250,7 +250,7 @@ class ProjectState:
         )
 
     def next_actionable_step(self) -> str | None:
-        for name in STEP_NAMES:
+        for name in PROJECT_RUN_STEPS:
             status = self.status(name)
             if status in {
                 StepStatus.PENDING,
