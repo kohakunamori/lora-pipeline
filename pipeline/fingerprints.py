@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from .config import load_base_registry, resolve_profiles, sha256_file, stable_hash
 from .dataset.image_info import discover_images
-from .models import ALL_STEP_NAMES, PipelineError
+from .models import PROJECT_RUN_STEPS, STEP_ALIASES, PipelineError
 from .prepared import load_current_generation
 
 if TYPE_CHECKING:
     from .state import ProjectState
 
 
-FINGERPRINT_VERSION = 7
+FINGERPRINT_VERSION = 8
 TRAINING_PROFILE_KEYS = (
     "precision",
     "attention",
@@ -28,27 +28,22 @@ TRAINING_PROFILE_KEYS = (
 )
 
 STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    "inspect": (),
-    "dedup": ("inspect",),
-    "identity": ("inspect",),
-    "caption": ("inspect",),
-    "review": ("dedup", "identity", "caption"),
-    "prepare": (),
-    "preflight": ("prepare",),
-    "train": ("preflight", "prepare"),
-    "evaluate": ("train",),
+    "materialize": (),
+    "preflight": ("materialize",),
+    "train": ("preflight", "materialize"),
 }
 
 
 def downstream_steps(name: str) -> tuple[str, ...]:
-    if name not in ALL_STEP_NAMES:
-        raise PipelineError(f"Unknown step: {name}")
-    reverse: dict[str, set[str]] = {step: set() for step in ALL_STEP_NAMES}
+    canonical = STEP_ALIASES.get(name, name)
+    if canonical not in PROJECT_RUN_STEPS:
+        raise PipelineError(f"Unknown Project step: {name}")
+    reverse: dict[str, set[str]] = {step: set() for step in PROJECT_RUN_STEPS}
     for step, dependencies in STEP_DEPENDENCIES.items():
         for dependency in dependencies:
             reverse[dependency].add(step)
     discovered: list[str] = []
-    queue: deque[str] = deque(sorted(reverse[name], key=ALL_STEP_NAMES.index))
+    queue: deque[str] = deque(sorted(reverse[canonical], key=PROJECT_RUN_STEPS.index))
     seen: set[str] = set()
     while queue:
         step = queue.popleft()
@@ -56,8 +51,8 @@ def downstream_steps(name: str) -> tuple[str, ...]:
             continue
         seen.add(step)
         discovered.append(step)
-        queue.extend(sorted(reverse[step], key=ALL_STEP_NAMES.index))
-    return tuple(sorted(discovered, key=ALL_STEP_NAMES.index))
+        queue.extend(sorted(reverse[step], key=PROJECT_RUN_STEPS.index))
+    return tuple(sorted(discovered, key=PROJECT_RUN_STEPS.index))
 
 
 def compute_step_signature(
@@ -66,76 +61,38 @@ def compute_step_signature(
     *,
     options: Mapping[str, Any] | None = None,
 ) -> str:
-    """Hash only the effective inputs that decide whether a step is reusable."""
+    """Hash the effective inputs that decide whether a Project step is reusable."""
 
-    if name not in ALL_STEP_NAMES:
-        raise PipelineError(f"Unknown step: {name}")
+    canonical = STEP_ALIASES.get(name, name)
+    if canonical not in PROJECT_RUN_STEPS:
+        raise PipelineError(f"Unknown Project step: {name}")
     options = dict(options or {})
     project = state.payload["project"]
     payload: dict[str, Any] = {
         "fingerprint_version": FINGERPRINT_VERSION,
-        "step": name,
+        "step": canonical,
         "options": options,
     }
 
-    if name == "inspect":
-        payload["raw_images"] = _raw_images(state)
-    elif name == "dedup":
-        payload["inspection"] = _step_output_fingerprint(state, "inspect")
-    elif name == "identity":
-        payload["concept_type"] = project.get("type")
-        payload["inspection"] = _step_output_fingerprint(state, "inspect")
-        payload["identity_profile"] = _profiles(state).concept.get("identity_check", {})
-    elif name == "caption":
+    if canonical == "materialize":
         profiles = _profiles(state)
         payload.update(
             {
                 "concept_type": project.get("type"),
                 "training_target_type": project.get("training_target_type", project.get("type")),
                 "trigger": project.get("trigger"),
+                "trigger_policy": project.get("trigger_policy", {}),
                 "caption_anchor_tags": project.get("caption_anchor_tags", []),
                 "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
                 "raw_images": _raw_images(state),
                 "raw_captions": _raw_captions(state),
-                "caption_profile": profiles.merged.get("caption", {}),
-                "tagger_profile": profiles.concept.get("tagger", {}),
-                "token_budget": profiles.merged.get("caption", {}).get(
-                    "max_token_length",
-                    profiles.hardware.get("caption", {}).get(
-                        "default_max_token_length", 75
-                    ),
-                ),
-            }
-        )
-    elif name == "review":
-        payload["dedup"] = _step_output_fingerprint(state, "dedup")
-        payload["identity"] = _step_output_fingerprint(state, "identity")
-        payload["caption"] = _step_output_fingerprint(state, "caption")
-        payload["existing_exclusions"] = _hash_optional(
-            state.project_dir / "review" / "exclusions.yaml"
-        )
-    elif name == "prepare":
-        profiles = _profiles(state)
-        payload.update(
-            {
-                "concept_type": project.get("type"),
-                "training_target_type": project.get("training_target_type", project.get("type")),
-                "trigger": project.get("trigger"),
-                "caption_anchor_tags": project.get("caption_anchor_tags", []),
-                "dataset_semantics_snapshot": project.get("dataset_semantics_snapshot", {}),
-                "raw_images": _raw_images(state),
-                "raw_captions": _raw_captions(state),
-                "exclusions": _hash_optional(
-                    state.project_dir / "review" / "exclusions.yaml"
-                ),
+                "exclusions": _hash_optional(state.project_dir / "review" / "exclusions.yaml"),
                 "caption_mode": _effective_caption_mode(project, options.get("caption_mode")),
                 "caption_profile": profiles.merged.get("caption", {}),
                 "tagger_profile": profiles.concept.get("tagger", {}),
                 "token_budget": profiles.merged.get("caption", {}).get(
                     "max_token_length",
-                    profiles.hardware.get("caption", {}).get(
-                        "default_max_token_length", 75
-                    ),
+                    profiles.hardware.get("caption", {}).get("default_max_token_length", 75),
                 ),
                 "allow_trigger_only": (
                     bool(options["allow_trigger_only"])
@@ -144,7 +101,7 @@ def compute_step_signature(
                 ),
             }
         )
-    elif name in {"preflight", "train"}:
+    else:
         profiles = _profiles(state)
         payload.update(
             {
@@ -159,25 +116,10 @@ def compute_step_signature(
                 "budget": project.get("budget", {}),
             }
         )
-    elif name == "evaluate":
-        profiles = _profiles(state)
-        payload.update(
-            {
-                "run": _run_fingerprint(state, options.get("run_id")),
-                "evaluation": profiles.merged.get("evaluation", {}),
-                "base": _base_fingerprint(state),
-                "trigger": project.get("trigger"),
-                "subject_prompt": project.get("evaluation", {}).get("subject_prompt"),
-                "validation_images": _validation_images(state),
-            }
-        )
     return stable_hash(payload)
 
 
 def _effective_caption_mode(project: Mapping[str, Any], requested: Any) -> str:
-    # Match prepare._resolve_caption_mode: guided training passes the mode
-    # explicitly; direct materialization must not inherit interactive workflow
-    # preferences and accidentally start an optional tagger backend.
     mode = str(requested or project.get("caption_mode") or "skip")
     if mode != "auto":
         return mode
@@ -219,10 +161,6 @@ def _raw_images(state: "ProjectState") -> list[dict[str, Any]]:
     return _image_fingerprints(state.project_dir / "raw")
 
 
-def _validation_images(state: "ProjectState") -> list[dict[str, Any]]:
-    return _image_fingerprints(state.project_dir / "validation")
-
-
 def _raw_captions(state: "ProjectState") -> list[dict[str, Any]]:
     raw = state.project_dir / "raw"
     records: list[dict[str, Any]] = []
@@ -237,16 +175,6 @@ def _raw_captions(state: "ProjectState") -> list[dict[str, Any]]:
                 }
             )
     return records
-
-
-def _step_output_fingerprint(state: "ProjectState", name: str) -> Mapping[str, Any]:
-    record = state.step(name)
-    manifest = record.get("output_manifest")
-    return {
-        "status": record.get("status"),
-        "input_hash": record.get("input_hash"),
-        "manifest": _hash_optional(Path(manifest)) if manifest else None,
-    }
 
 
 def _prepared_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
@@ -279,30 +207,6 @@ def _base_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
         "stat": stat,
         "generation_defaults": dict(base.generation_defaults),
     }
-
-
-def _run_fingerprint(state: "ProjectState", run_id: Any) -> Mapping[str, Any]:
-    requested = str(run_id) if run_id else None
-    for record in reversed(state.payload.get("runs", [])):
-        if requested is not None and record.get("id") != requested:
-            continue
-        if record.get("status") in {"trained", "evaluated", "promoted"}:
-            checkpoints = []
-            for value in record.get("checkpoints", []):
-                path = Path(value)
-                checkpoints.append(
-                    {
-                        "path": str(path),
-                        "bytes": path.stat().st_size if path.is_file() else None,
-                        "sha256": sha256_file(path) if path.is_file() else None,
-                    }
-                )
-            return {
-                "id": record.get("id"),
-                "accounting": record.get("accounting", {}),
-                "checkpoints": checkpoints,
-            }
-    return {"missing": True, "requested_run_id": requested}
 
 
 def _hash_optional(path: Path) -> Mapping[str, Any] | None:
