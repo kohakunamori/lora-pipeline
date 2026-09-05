@@ -8,19 +8,14 @@ tagger:
   challenger_backend: null
   conflict_delta: 0.35
 
-identity_check:
-  enabled: true
-  method: ccip
-  min_samples: 2
-
 caption:
-  trigger_position: first
+  # Target semantics, not a training-speed preset. TrainingConfig may explicitly
+  # override this under overrides.caption.policy.
+  policy: balanced
   describe_outfit: true
   describe_pose: true
   describe_expression: true
   describe_background: true
-  caption_identity_features:
-    mode: conservative
   blacklist:
     - artist_name
     - signature
@@ -37,9 +32,6 @@ caption:
     - objects
     - lighting
 
-# Non-destructive dataset/target mismatch diagnostics. These thresholds only emit
-# warnings; they never auto-exclude samples. Because they live under concept limits,
-# changes participate in the existing preflight/train fingerprints.
 limits:
   target_dataset:
     minimum_images: 12
@@ -49,6 +41,8 @@ limits:
     minimum_category_caption_coverage: 0.25
 
 evaluation:
+  # This evaluates the trained LoRA. It is intentionally unrelated to the removed
+  # Dataset identity-check stage.
   identity: true
   leakage: true
   cross_content: true
