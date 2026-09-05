@@ -7,19 +7,18 @@ from typing import Any, Callable
 
 from .config import load_base_registry, repository_root, write_json_atomic
 from .dataset.image_info import discover_images, inspect_dataset
-from .evaluation.generation import GenerationBackend
 from .fingerprints import compute_step_signature
+from .materialization import run as materialize
 from .models import (
-    ALL_STEP_NAMES,
-    OPTIONAL_STEPS,
     PROJECT_RUN_STEPS,
+    STEP_ALIASES,
     PipelineError,
     StateError,
     StepResult,
     StepStatus,
 )
 from .state import ProjectState, execute_step, project_lock
-from .steps import caption, dedup, evaluate, identity, inspect, preflight, prepare, review, train
+from .steps import preflight, train
 from .trainer.base import TrainerBackend
 
 
@@ -64,6 +63,7 @@ def create_project(
     images = discover_images(dataset)
     if not images:
         raise PipelineError(f"No supported images were found under {dataset}")
+
     destination = project_path(name, root=root)
     state = ProjectState.create(
         destination,
@@ -89,22 +89,10 @@ def create_project(
         state.save()
         raise
 
-    # Inspection is a dataset import invariant, not a training-run stage. Freeze
-    # it immediately beside the immutable Project raw snapshot so Preflight and
-    # legacy readers still consume the same manifest without replaying `inspect`
-    # during every Project run.
+    # Dataset inspection is frozen evidence attached to the raw snapshot. It is
+    # not a Project lifecycle step.
     inspection = inspect_dataset(destination / "raw")
-    inspection_path = destination / "dataset-manifest.json"
-    write_json_atomic(inspection_path, inspection)
-    state.payload["steps"]["inspect"] = {
-        "status": StepStatus.SKIPPED.value,
-        "attempts": 0,
-        "reason": "inspection frozen when the Project raw snapshot was created",
-        "permanent": True,
-        "input_hash": str(inspection["input_hash"]),
-        "output_manifest": str(inspection_path),
-        "details": dict(inspection["summary"]),
-    }
+    write_json_atomic(destination / "dataset-manifest.json", inspection)
     state.payload["project"].update(
         {
             "budget": {"unit": "images_seen", "value": images_seen},
@@ -131,54 +119,41 @@ def run_single_step(
     dry_run: bool = False,
     verbose: int = 0,
     caption_mode: str | None = None,
-    exclude_exact: bool = False,
-    exclusions: list[str] | None = None,
     allow_trigger_only: bool | None = None,
     images_seen: int | None = None,
     optimizer_steps: int | None = None,
     resume_run: str | None = None,
-    evaluation_stage: str = "screening",
-    evaluation_run: str | None = None,
-    evaluation_checkpoints: list[str] | None = None,
     trainer_backend: TrainerBackend | None = None,
-    generation_backend: GenerationBackend | None = None,
 ) -> StepResult:
-    if name not in ALL_STEP_NAMES:
-        raise StateError(f"Unknown step: {name}")
+    canonical = STEP_ALIASES.get(name, name)
+    if canonical not in PROJECT_RUN_STEPS:
+        raise StateError(f"Unknown Project step: {name}")
     options = _step_options(
-        name,
+        canonical,
         caption_mode=caption_mode,
-        exclude_exact=exclude_exact,
-        exclusions=exclusions,
         allow_trigger_only=allow_trigger_only,
         images_seen=images_seen,
         optimizer_steps=optimizer_steps,
         resume_run=resume_run,
-        evaluation_stage=evaluation_stage,
-        evaluation_run=evaluation_run,
-        evaluation_checkpoints=evaluation_checkpoints,
     )
-    if dry_run and name != "train":
+
+    if dry_run and canonical != "train":
         fresh = ProjectState.load(state.project_dir)
-        fingerprint = compute_step_signature(fresh, name, options=options)
+        fingerprint = compute_step_signature(fresh, canonical, options=options)
         return StepResult(
             details={
                 "dry_run": True,
-                "would_run": name,
+                "would_run": canonical,
                 "input_fingerprint": fingerprint,
-                "currently_reusable": fresh.step(name).get("input_hash") == fingerprint
-                and fresh.status(name) in {StepStatus.DONE, StepStatus.SKIPPED},
+                "currently_reusable": fresh.step(canonical).get("input_hash") == fingerprint
+                and fresh.status(canonical) in {StepStatus.DONE, StepStatus.SKIPPED},
             }
         )
 
     with project_lock(state.project_dir, break_lock=break_lock):
         state = ProjectState.load(state.project_dir)
-        fingerprint = compute_step_signature(state, name, options=options)
-        if name == "caption" and caption_mode == "skip":
-            state.payload["project"]["caption_mode"] = "skip"
-            state.skip(name, "caption explicitly skipped", input_hash=fingerprint)
-            return _record_result(state, name)
-        if name == "train" and dry_run:
+        fingerprint = compute_step_signature(state, canonical, options=options)
+        if canonical == "train" and dry_run:
             result, _ = train.run(
                 state,
                 backend=trainer_backend,
@@ -191,25 +166,15 @@ def run_single_step(
             return result
 
         handler: Callable[[], StepResult]
-        if name == "inspect":
-            handler = lambda: inspect.run(state)
-        elif name == "dedup":
-            handler = lambda: dedup.run(state, exclude_exact=exclude_exact)
-        elif name == "identity":
-            handler = lambda: identity.run(state)
-        elif name == "caption":
-            handler = lambda: caption.run(state, mode=caption_mode or "generate")
-        elif name == "review":
-            handler = lambda: review.run(state, exclude=exclusions)
-        elif name == "prepare":
-            handler = lambda: prepare.run(
+        if canonical == "materialize":
+            handler = lambda: materialize(
                 state,
                 allow_trigger_only=allow_trigger_only,
                 caption_mode=caption_mode,
             )
-        elif name == "preflight":
+        elif canonical == "preflight":
             handler = lambda: preflight.run(state)
-        elif name == "train":
+        else:
             handler = lambda: train.run(
                 state,
                 backend=trainer_backend,
@@ -218,60 +183,31 @@ def run_single_step(
                 resume_run=resume_run,
                 verbose=verbose,
             )[0]
-        else:
-            handler = lambda: evaluate.run(
-                state,
-                backend=generation_backend,
-                verbose=verbose,
-                stage=evaluation_stage,
-                run_id=evaluation_run,
-                checkpoint_names=evaluation_checkpoints,
-            )
-        return execute_step(state, name, handler, input_hash=fingerprint, force=force)
+        return execute_step(state, canonical, handler, input_hash=fingerprint, force=force)
 
 
 def run_remaining(
     state: ProjectState,
     *,
-    skip: set[str] | None = None,
     skip_preflight: bool = False,
     force: bool = False,
     break_lock: bool = False,
     dry_run: bool = False,
     verbose: int = 0,
     caption_mode: str = "generate",
-    exclude_exact: bool = False,
     allow_trigger_only: bool | None = None,
     images_seen: int | None = None,
     resume_run: str | None = None,
     on_step: Callable[[str], None] | None = None,
     trainer_backend: TrainerBackend | None = None,
-    generation_backend: GenerationBackend | None = None,
 ) -> list[tuple[str, StepResult]]:
-    skip = skip or set()
-    invalid = skip - OPTIONAL_STEPS
-    if invalid:
-        raise PipelineError("These steps cannot be skipped: " + ", ".join(sorted(invalid)))
-    if "caption" in skip:
-        caption_mode = "skip"
     results: list[tuple[str, StepResult]] = []
     can_break = break_lock
     for name in PROJECT_RUN_STEPS:
         state = ProjectState.load(state.project_dir)
-        if state.step(name).get("permanent") and state.status(name) is StepStatus.SKIPPED:
-            continue
         if on_step is not None:
             on_step(name)
-        if dry_run and name in skip:
-            result = StepResult(
-                status=StepStatus.SKIPPED,
-                details={
-                    "dry_run": True,
-                    "would_skip": name,
-                    "reason": "explicitly skipped by run command",
-                },
-            )
-        elif dry_run and name == "preflight" and skip_preflight:
+        if dry_run and name == "preflight" and skip_preflight:
             result = StepResult(
                 status=StepStatus.SKIPPED,
                 details={
@@ -280,19 +216,6 @@ def run_remaining(
                     "reason": "expert --skip-preflight override",
                     "warning": True,
                 },
-            )
-        elif name in skip:
-            result = skip_optional_step(
-                state,
-                name,
-                reason="explicitly skipped by run command",
-                break_lock=can_break,
-                options=_step_options(
-                    name,
-                    caption_mode="skip" if name == "caption" else caption_mode,
-                    exclude_exact=exclude_exact,
-                    allow_trigger_only=allow_trigger_only,
-                ),
             )
         elif name == "preflight" and skip_preflight:
             result = skip_preflight_step(state, break_lock=can_break)
@@ -304,13 +227,11 @@ def run_remaining(
                 break_lock=can_break,
                 dry_run=dry_run,
                 verbose=verbose,
-                caption_mode=caption_mode,
-                exclude_exact=exclude_exact,
-                allow_trigger_only=allow_trigger_only,
+                caption_mode=caption_mode if name == "materialize" else None,
+                allow_trigger_only=allow_trigger_only if name == "materialize" else None,
                 images_seen=images_seen,
                 resume_run=resume_run if name == "train" else None,
                 trainer_backend=trainer_backend,
-                generation_backend=generation_backend,
             )
         can_break = False
         if not result.details.get("reused"):
@@ -318,30 +239,6 @@ def run_remaining(
         if dry_run and not result.details.get("reused"):
             break
     return results
-
-
-def skip_optional_step(
-    state: ProjectState,
-    name: str,
-    *,
-    reason: str,
-    break_lock: bool = False,
-    options: dict[str, Any] | None = None,
-) -> StepResult:
-    with project_lock(state.project_dir, break_lock=break_lock):
-        state = ProjectState.load(state.project_dir)
-        fingerprint = compute_step_signature(state, name, options={**(options or {}), "skip": True})
-        before = state.step(name).get("input_hash")
-        if name == "caption":
-            state.payload["project"]["caption_mode"] = "skip"
-        state.skip(name, reason, input_hash=fingerprint)
-        result = _record_result(state, name)
-        return StepResult(
-            status=result.status,
-            input_hash=result.input_hash,
-            output_manifest=result.output_manifest,
-            details={"reused": before == fingerprint, **dict(result.details)},
-        )
 
 
 def skip_preflight_step(state: ProjectState, *, break_lock: bool = False) -> StepResult:
@@ -370,13 +267,7 @@ def _record_result(state: ProjectState, name: str) -> StepResult:
 
 
 def _step_options(name: str, **values: Any) -> dict[str, Any]:
-    if name == "dedup":
-        return {"exclude_exact": values.get("exclude_exact", False)}
-    if name == "caption":
-        return {"mode": values.get("caption_mode") or "generate"}
-    if name == "review":
-        return {"exclusions": sorted(values.get("exclusions") or [])}
-    if name == "prepare":
+    if name == "materialize":
         return {
             "allow_trigger_only": values.get("allow_trigger_only"),
             "caption_mode": values.get("caption_mode"),
@@ -386,11 +277,5 @@ def _step_options(name: str, **values: Any) -> dict[str, Any]:
             "images_seen_override": values.get("images_seen"),
             "optimizer_steps_override": values.get("optimizer_steps"),
             "resume_run": values.get("resume_run"),
-        }
-    if name == "evaluate":
-        return {
-            "stage": values.get("evaluation_stage", "screening"),
-            "run_id": values.get("evaluation_run"),
-            "checkpoints": sorted(values.get("evaluation_checkpoints") or []),
         }
     return {}
