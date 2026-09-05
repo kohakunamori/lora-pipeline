@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from ..models import PipelineError
+from ..models import OptionalBackendUnavailable, PipelineError
 from .subject import Box, SubjectDetector, SubjectObservation
 
 CROP_POLICY_VERSION = 1
@@ -58,7 +58,12 @@ def plan_target_crop(
     detector: SubjectDetector | None = None,
     minimum_crop_short_edge: int = MINIMUM_CROP_SHORT_EDGE,
 ) -> CropPlan:
-    """Plan a conservative target-aware crop from original pixels."""
+    """Plan a conservative target-aware crop from original pixels.
+
+    Subject detection is an optimization, not a validity requirement. If the
+    optional DeepGHS backend is unavailable, preserve the original composition
+    and record the reason rather than blocking materialization.
+    """
 
     if target_type not in {"character", "character_outfit", "style"}:
         raise PipelineError(f"Unsupported crop target: {target_type}")
@@ -92,7 +97,18 @@ def plan_target_crop(
             minimum_crop_short_edge=minimum_crop_short_edge,
         )
 
-    observation = (detector or SubjectDetector()).detect_path(source)
+    try:
+        observation = (detector or SubjectDetector()).detect_path(source)
+    except OptionalBackendUnavailable:
+        return CropPlan(
+            target_type=target_type,
+            source_size=source_size,
+            crop_box=None,
+            mode="keep",
+            reason="subject_detector_unavailable",
+            subject=None,
+            minimum_crop_short_edge=minimum_crop_short_edge,
+        )
     if observation is None:
         return CropPlan(
             target_type=target_type,
