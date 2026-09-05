@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
-import pipeline.materialization.service as materialization_service
+import pipeline.materialization.visual as materialization_visual
 from pipeline.dataset.crop import CropPlan
 from pipeline.materialization import run as materialize
 from pipeline.prepared import load_current_generation
@@ -43,7 +43,7 @@ def test_materialization_applies_crop_before_one_mp_normalization(
             minimum_crop_short_edge=minimum_crop_short_edge,
         )
 
-    monkeypatch.setattr(materialization_service, "plan_target_crop", fake_crop)
+    monkeypatch.setattr(materialization_visual, "plan_target_crop", fake_crop)
 
     result = materialize(state)
     generation = load_current_generation(state.project_dir)
