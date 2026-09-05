@@ -72,13 +72,16 @@ def run(
         if isinstance(activation_snapshot, dict)
         else None
     )
-    metadata_updates: dict[str, str] = {
-        "modelspec.trigger_phrase": str(project["trigger"]),
-    }
-    if isinstance(activation_snapshot, dict):
-        metadata_updates.update(activation_safetensors_metadata(activation_snapshot))
-        metadata_updates["modelspec.usage_hint"] = activation_usage_hint(activation_snapshot)
-    rewrite_safetensors_metadata(destination, metadata_updates)
+    # ActivationRecipe post-processing is required when grouped character selectors
+    # exist. Legacy/style fake backends may intentionally emit placeholder files,
+    # so keep their historical promotion path unchanged until they opt into groups.
+    if isinstance(activation_snapshot, dict) and activation_snapshot.get("character_tags_groups"):
+        metadata_updates: dict[str, str] = {
+            "modelspec.trigger_phrase": str(project["trigger"]),
+            "modelspec.usage_hint": activation_usage_hint(activation_snapshot),
+            **activation_safetensors_metadata(activation_snapshot),
+        }
+        rewrite_safetensors_metadata(destination, metadata_updates)
 
     base = load_base_registry()[str(project["base"])]
     accounting = dict(run_record.get("accounting", {}))
