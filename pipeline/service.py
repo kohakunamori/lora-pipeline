@@ -7,6 +7,8 @@ from typing import Any, Callable
 
 from .config import load_base_registry, repository_root, write_json_atomic
 from .dataset.image_info import discover_images, inspect_dataset
+from .evaluation.generation import GenerationBackend
+from .evaluation.service import run as evaluate_run
 from .fingerprints import compute_step_signature
 from .materialization import run as materialize
 from .models import (
@@ -89,8 +91,6 @@ def create_project(
         state.save()
         raise
 
-    # Dataset inspection is frozen evidence attached to the raw snapshot. It is
-    # not a Project lifecycle step.
     inspection = inspect_dataset(destination / "raw")
     write_json_atomic(destination / "dataset-manifest.json", inspection)
     state.payload["project"].update(
@@ -124,7 +124,43 @@ def run_single_step(
     optimizer_steps: int | None = None,
     resume_run: str | None = None,
     trainer_backend: TrainerBackend | None = None,
+    evaluation_stage: str = "screening",
+    evaluation_run: str | None = None,
+    evaluation_checkpoints: list[str] | None = None,
+    generation_backend: GenerationBackend | None = None,
+    **legacy_options: Any,
 ) -> StepResult:
+    """Run a canonical Project step or the legacy stateless Results entrypoint.
+
+    ``evaluate`` is accepted only as a compatibility command surface. It is not a
+    Project step: it has no step record, no Project fingerprint and never affects
+    ``next_actionable_step``.
+    """
+
+    del legacy_options
+    if name == "evaluate":
+        if dry_run:
+            return StepResult(
+                details={
+                    "dry_run": True,
+                    "would_run": "evaluate",
+                    "stage": evaluation_stage,
+                    "run_id": evaluation_run,
+                    "checkpoints": list(evaluation_checkpoints or []),
+                    "result_scoped": True,
+                }
+            )
+        with project_lock(state.project_dir, break_lock=break_lock):
+            fresh = ProjectState.load(state.project_dir)
+            return evaluate_run(
+                fresh,
+                backend=generation_backend,
+                verbose=verbose,
+                stage=evaluation_stage,
+                run_id=evaluation_run,
+                checkpoint_names=evaluation_checkpoints,
+            )
+
     canonical = STEP_ALIASES.get(name, name)
     if canonical not in PROJECT_RUN_STEPS:
         raise StateError(f"Unknown Project step: {name}")
@@ -200,7 +236,30 @@ def run_remaining(
     resume_run: str | None = None,
     on_step: Callable[[str], None] | None = None,
     trainer_backend: TrainerBackend | None = None,
+    **legacy_options: Any,
 ) -> list[tuple[str, StepResult]]:
+    """Run only materialize -> preflight -> train.
+
+    Legacy skip flags are ignored only when false/empty; requesting a removed
+    curation/result step is rejected rather than silently pretending it ran.
+    """
+
+    skip = set(legacy_options.pop("skip", set()) or set())
+    requested_removed = skip - {"caption"}
+    if requested_removed:
+        raise PipelineError(
+            "Removed Project steps cannot be skipped because they no longer run: "
+            + ", ".join(sorted(requested_removed))
+        )
+    if "caption" in skip:
+        caption_mode = "skip"
+    if legacy_options:
+        # Old callers may still pass no-op flags such as exclude_exact or a removed
+        # generation backend. Accept false/None values, reject active requests.
+        active = {key: value for key, value in legacy_options.items() if value not in (None, False, [], {}, set())}
+        if active:
+            raise PipelineError("Unsupported removed Project options: " + ", ".join(sorted(active)))
+
     results: list[tuple[str, StepResult]] = []
     can_break = break_lock
     for name in PROJECT_RUN_STEPS:
