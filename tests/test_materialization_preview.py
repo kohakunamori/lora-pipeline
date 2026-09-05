@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline.materialization import run as materialize
+from pipeline.materialization.preview import preview_path
 from pipeline.prepared import load_current_generation
 from pipeline.state import ProjectState
 
@@ -28,23 +29,24 @@ def test_materialization_writes_side_by_side_preview(tmp_path: Path) -> None:
 
     materialize(state)
     generation = load_current_generation(state.project_dir)
-    preview = generation.root / "preview.html"
+    preview = preview_path(state.project_dir, generation.generation_id)
     pointer = json.loads(
         (state.project_dir / "prepared" / "current.json").read_text(encoding="utf-8")
     )
 
     assert preview.is_file()
+    assert generation.root not in preview.parents
     text = preview.read_text(encoding="utf-8")
     assert "Materialization Preview" in text
     assert "sample.png" in text
     assert "zz_preview, 1girl, blue dress, outdoors" in text
     assert "style_preserves_composition" in text
-    assert "../../../raw/sample.png" in text
-    assert "images/sample.png" in text
-    assert pointer["preview"].endswith("/preview.html")
+    assert "../../raw/sample.png" in text
+    assert f"../generations/{generation.generation_id}/images/sample.png" in text
+    assert pointer["preview"] == preview.relative_to(state.project_dir).as_posix()
 
 
-def test_preview_does_not_change_generation_identity(tmp_path: Path) -> None:
+def test_preview_does_not_change_generation_identity_or_bytes(tmp_path: Path) -> None:
     state = ProjectState.create(
         tmp_path / "project",
         name="preview-stable",
@@ -59,10 +61,20 @@ def test_preview_does_not_change_generation_identity(tmp_path: Path) -> None:
 
     first = materialize(state)
     generation = load_current_generation(state.project_dir)
-    preview = generation.root / "preview.html"
+    preview = preview_path(state.project_dir, generation.generation_id)
+    generation_bytes = {
+        path.relative_to(generation.root).as_posix(): path.read_bytes()
+        for path in generation.root.rglob("*")
+        if path.is_file()
+    }
     preview.write_text("locally edited review artifact", encoding="utf-8")
 
     second = materialize(state)
     assert second.details["generation_id"] == first.details["generation_id"]
     assert second.details["reused_generation"] is True
     assert "Materialization Preview" in preview.read_text(encoding="utf-8")
+    assert {
+        path.relative_to(generation.root).as_posix(): path.read_bytes()
+        for path in generation.root.rglob("*")
+        if path.is_file()
+    } == generation_bytes
