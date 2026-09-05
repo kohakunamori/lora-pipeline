@@ -20,39 +20,30 @@ class StepStatus(StrEnum):
     FAILED = "failed"
 
 
-# Persisted only so old Projects and explicit legacy CLI/API calls keep working
-# while DatasetWorkspace owns curation going forward.
-PROJECT_UTILITY_STEPS = (
+# Canonical Project lifecycle. Dataset curation is owned by DatasetWorkspace and
+# evaluation/promotion are run-scoped Results operations.
+PROJECT_RUN_STEPS = (
+    "materialize",
+    "preflight",
+    "train",
+)
+STEP_NAMES = PROJECT_RUN_STEPS
+ALL_STEP_NAMES = PROJECT_RUN_STEPS
+
+# Compatibility is deliberately data/alias-only: old records may be migrated into
+# ``legacy_steps`` and the old ``prepare`` command maps to ``materialize``. These
+# names are not live Project steps anymore.
+LEGACY_PROJECT_STEPS = (
     "inspect",
     "dedup",
     "identity",
     "caption",
     "review",
-)
-
-# The actual Project training lifecycle. Caption generation/normalization is an
-# input transform of `prepare` (future name: materialize), rather than a separate
-# state-machine stage. Results are also kept outside this lifecycle.
-PROJECT_RUN_STEPS = (
     "prepare",
-    "preflight",
-    "train",
-)
-
-# Result operations are repeatable derivatives of a completed run and belong to
-# the Results area, not Project step navigation.
-PROJECT_RESULT_STEPS = (
     "evaluate",
 )
-
-# User-facing Project steps. Dataset curation and Results operations are both
-# intentionally excluded from the Project step menu.
-STEP_NAMES = PROJECT_RUN_STEPS
-
-# Full persisted/dispatch namespace, including legacy compatibility records and
-# repeatable Results operations.
-ALL_STEP_NAMES = PROJECT_UTILITY_STEPS + PROJECT_RUN_STEPS + PROJECT_RESULT_STEPS
-OPTIONAL_STEPS = frozenset({"dedup", "identity", "caption", "review", "evaluate"})
+STEP_ALIASES = {"prepare": "materialize"}
+OPTIONAL_STEPS = frozenset()
 
 
 @dataclass(frozen=True)
