@@ -1,29 +1,4 @@
-from __future__ import annotations
+"""Deprecated compatibility module with no import-time side effects.
 
-from pathlib import Path
-
-from . import interactive_lifecycle
-from .dataset_metadata_snapshot import attach_dataset_metadata_snapshot
-from .dataset_workspace import DatasetWorkspace
-from .state import ProjectState
-from .training_config import TrainingConfig
-from .training_config import create_project_from_training_config as _create_project_from_training_config
-
-
-def _create_with_metadata(
-    workspace: DatasetWorkspace,
-    config: TrainingConfig,
-    *,
-    project_name: str,
-    root: Path | None = None,
-) -> ProjectState:
-    state = _create_project_from_training_config(
-        workspace,
-        config,
-        project_name=project_name,
-        root=root,
-    )
-    return attach_dataset_metadata_snapshot(state, workspace)
-
-
-interactive_lifecycle.create_project_from_training_config = _create_with_metadata
+Dataset metadata is frozen by the canonical TrainingConfig Project factory.
+"""
