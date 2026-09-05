@@ -9,7 +9,19 @@ from urllib.parse import quote
 
 from ..models import PipelineError
 
-PREVIEW_FILENAME = "preview.html"
+
+def previews_root(project_dir: Path) -> Path:
+    return project_dir / "prepared" / "previews"
+
+
+def preview_path(project_dir: Path, generation_id: str) -> Path:
+    if not generation_id or any(part in {"", ".", ".."} for part in Path(generation_id).parts):
+        raise PipelineError(f"Invalid preview generation id: {generation_id!r}")
+    root = previews_root(project_dir).resolve()
+    candidate = (root / f"{generation_id}.html").resolve()
+    if candidate.parent != root:
+        raise PipelineError(f"Preview path escapes its root: {generation_id!r}")
+    return candidate
 
 
 def write_generation_preview(
@@ -18,11 +30,11 @@ def write_generation_preview(
     *,
     manifest: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Write a self-contained local HTML review page for one prepared generation.
+    """Write a regenerable local HTML review page outside the immutable generation.
 
-    The preview is deliberately outside the generation hash contract: it is a
-    deterministic review artifact derived from the immutable manifest and files.
-    Training never reads it.
+    Training generations remain byte-stable under ``prepared/generations``. Human
+    review artifacts live under ``prepared/previews`` and can be freely regenerated;
+    training never reads them and they never participate in generation identity.
     """
 
     project_dir = project_dir.resolve()
@@ -32,13 +44,23 @@ def write_generation_preview(
     if not isinstance(records, list):
         raise PipelineError("Prepared manifest images must be a list")
 
+    generation_id_raw = str(payload.get("generation_id", generation_root.name))
+    output = preview_path(project_dir, generation_id_raw)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    link_base = output.parent
     cards = [
-        _render_record(project_dir, generation_root, record, index=index)
+        _render_record(
+            project_dir,
+            generation_root,
+            link_base,
+            record,
+            index=index,
+        )
         for index, record in enumerate(records, start=1)
         if isinstance(record, Mapping)
     ]
     target_type = html.escape(str(payload.get("training_target_type", "unknown")))
-    generation_id = html.escape(str(payload.get("generation_id", generation_root.name)))
+    generation_id = html.escape(generation_id_raw)
     manifest_hash = html.escape(str(payload.get("manifest_hash", "")))
     document = f"""<!doctype html>
 <html lang="en">
@@ -71,14 +93,14 @@ img {{ width: 100%; max-height: 720px; object-fit: contain; background: color-mi
 </body>
 </html>
 """
-    path = generation_root / PREVIEW_FILENAME
-    path.write_text(document, encoding="utf-8")
-    return path
+    output.write_text(document, encoding="utf-8")
+    return output
 
 
 def _render_record(
     project_dir: Path,
     generation_root: Path,
+    link_base: Path,
     record: Mapping[str, Any],
     *,
     index: int,
@@ -90,8 +112,8 @@ def _render_record(
     prepared_path = generation_root / prepared_rel
     caption_path = generation_root / caption_rel
 
-    raw_href = _local_href(generation_root, raw_path)
-    prepared_href = _local_href(generation_root, prepared_path)
+    raw_href = _local_href(link_base, raw_path)
+    prepared_href = _local_href(link_base, prepared_path)
     caption = (
         caption_path.read_text(encoding="utf-8", errors="replace").strip()
         if caption_path.is_file()
