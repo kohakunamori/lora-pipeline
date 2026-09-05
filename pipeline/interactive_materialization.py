@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 from .dataset_workspace import DatasetWorkspace
 from .interactive_semantic_concepts import InteractiveWizard as BaseInteractiveWizard
-from .models import PipelineError
 from .wizard import MenuItem
 
 
 class InteractiveWizard(BaseInteractiveWizard):
-    """Narrow final Dataset UX to the materialization contract.
+    """Final Dataset UX aligned with the materialization compiler contract.
 
-    Identity is trusted at ingestion. The normal path is therefore:
-    import -> subject crop -> sanity check/tag/edit -> TrainingConfig -> prepared
-    ~1MP generation. Legacy pHash/CCIP/advanced curation functions remain importable
-    for old workspaces but are intentionally absent from this menu.
+    Imported Dataset sources stay unchanged. Target-aware crop, downscale, caption
+    policy and TriggerPolicy are applied exactly once when a TrainingConfig is
+    materialized into an immutable prepared generation.
     """
 
     def dataset_dashboard(self, name: str) -> None:
@@ -29,16 +24,16 @@ class InteractiveWizard(BaseInteractiveWizard):
                         "import",
                         self._b("导入素材", "Import material"),
                         self._b(
-                            "人物图片会默认执行主体检测/智能裁剪；视频抽帧后走同一主体流程。",
-                            "Character images automatically run subject detection/smart crop; video frames use the same subject path.",
+                            "保留原始图片/视频抽帧；训练目标相关裁剪只在 materialize 阶段执行一次。",
+                            "Keep imported images/video frames unchanged; target-aware crop runs once during materialization.",
                         ),
                     ),
                     MenuItem(
                         "sources",
-                        self._b("来源与裁剪", "Sources and crops"),
+                        self._b("来源管理", "Manage sources"),
                         self._b(
-                            "查看来源、启停来源，必要时重新执行单来源智能裁剪。",
-                            "Inspect/toggle sources and rerun smart crop for a source when needed.",
+                            "查看来源并启用/停用；RAW 来源不会被训练流程改写。",
+                            "Inspect and enable/disable sources; training never rewrites RAW sources.",
                         ),
                     ),
                     MenuItem(
@@ -53,16 +48,16 @@ class InteractiveWizard(BaseInteractiveWizard):
                         "tag",
                         self._b("自动打 Tag", "Auto-tag"),
                         self._b(
-                            "使用缓存的 WD EVA02 Tagger；已有人工 .txt 默认不覆盖。",
-                            "Use the cached WD EVA02 tagger; existing manual .txt captions are preserved by default.",
+                            "可在 Dataset 阶段准备/修正 caption；训练时 generate/hybrid 会对最终训练像素重新打标。",
+                            "Prepare/correct captions in Dataset; generate/hybrid retags the exact final training pixels during materialization.",
                         ),
                     ),
                     MenuItem(
                         "edit_tags",
                         self._b("修正 Tag", "Edit tags"),
                         self._b(
-                            "只在需要时人工修正自动 Tag。",
-                            "Manually correct auto-tags only when necessary.",
+                            "只在需要时人工修正 Tag。",
+                            "Manually correct tags only when necessary.",
                         ),
                     ),
                     MenuItem(
@@ -77,8 +72,8 @@ class InteractiveWizard(BaseInteractiveWizard):
                         "training",
                         self._b("开始训练", "Start training"),
                         self._b(
-                            "选择 TrainingConfig；TriggerPolicy、caption 与约 1MP 图像归一化在 materialize 阶段冻结。",
-                            "Choose a TrainingConfig; TriggerPolicy, captions, and ~1MP image normalization are frozen during materialization.",
+                            "选择 TrainingConfig；materialize 会冻结 crop、约 1MP 训练图、caption/trigger，并生成 preview.html 供检查。",
+                            "Choose a TrainingConfig; materialize freezes crop, ~1MP training pixels and caption/trigger, then writes preview.html for review.",
                         ),
                     ),
                     MenuItem("back", self._b("返回", "Back")),
@@ -101,94 +96,3 @@ class InteractiveWizard(BaseInteractiveWizard):
                 self._review_dataset_items(workspace)
             elif action == "training":
                 self._start_training_from_dataset_config(prefilled_workspace=workspace)
-
-    def _import_image_directory(self, workspace: DatasetWorkspace) -> None:
-        while True:
-            directory = Path(
-                self._ask_text(self._b("图片目录路径", "Image directory path"))
-            ).expanduser().resolve()
-            if directory.is_dir():
-                break
-            self.console.print(
-                self._b(
-                    f"[red]目录不存在：{directory}[/red]",
-                    f"[red]Directory does not exist: {directory}[/red]",
-                )
-            )
-        label = self._ask_text(
-            self._b("来源名称", "Source label"),
-            default=directory.name or "images",
-        ).strip()
-        record = workspace.add_source_from_directory(
-            directory,
-            kind="image_directory",
-            label=label,
-            origin=str(directory),
-        )
-        self._render_source_imported(record)
-
-        if workspace.concept_type != "character":
-            return
-        source_id = str(record["id"])
-        try:
-            self._smart_crop_source(workspace, source_id)
-        except PipelineError as exc:
-            self.console.print(
-                self._b(
-                    f"[yellow]自动主体裁剪未完成，已保留原始来源：{exc}[/yellow]",
-                    f"[yellow]Automatic subject crop did not complete; original source retained: {exc}[/yellow]",
-                )
-            )
-
-    def _smart_crop_source(self, workspace: DatasetWorkspace, source_id: str) -> None:
-        """Create one derived subject-crop source with no extra confirmation prompts."""
-
-        source = workspace.sources[source_id]
-        work_root = workspace.dataset_dir / "cache" / "work"
-        work_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=f"crop-{source_id}-", dir=work_root) as temporary:
-            frame_dir = Path(temporary) / "frames"
-            count = workspace.export_source_active(source_id, frame_dir)
-            if count == 0:
-                raise PipelineError(
-                    self._b(
-                        "这个来源没有可裁切的未排除图片。",
-                        "This source has no non-excluded images to crop.",
-                    )
-                )
-            training_dir, materialization = self._select_video_identity(frame_dir)
-
-            # Detector/model failure deliberately returns the exported originals.
-            # Do not manufacture a duplicate smart_crop source in that case.
-            if training_dir.resolve() == frame_dir.resolve():
-                self.console.print(
-                    self._b(
-                        "[yellow]未生成主体裁切；原来源继续启用。[/yellow]",
-                        "[yellow]No subject crop was generated; the original source remains enabled.[/yellow]",
-                    )
-                )
-                return
-
-            label = f"{source.get('label', source_id)}-crop"
-            record = workspace.add_source_from_directory(
-                training_dir,
-                kind="smart_crop",
-                label=label,
-                origin=f"derived:{source_id}",
-                parent_source=source_id,
-                processing={
-                    "subject_materialization": materialization,
-                    "input_images": count,
-                },
-            )
-
-        # A successful derived crop becomes the active representation. The original
-        # remains on disk and can be re-enabled from the source manager at any time.
-        workspace.set_source_enabled(source_id, False)
-        self._render_source_imported(record)
-        self.console.print(
-            self._b(
-                f"[green]已自动启用裁切来源 {record['id']}，并停用原来源 {source_id}。[/green]",
-                f"[green]Enabled crop source {record['id']} and disabled original source {source_id} automatically.[/green]",
-            )
-        )
