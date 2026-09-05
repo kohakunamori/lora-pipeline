@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from PIL import Image
@@ -52,6 +53,7 @@ def test_caption_tagger_reads_materialized_visual_override(tmp_path: Path) -> No
 
     assert tagger.seen == [visual.resolve()]
     assert result.details["captions"] == 1
-    generated = state.project_dir / "review" / "captions" / "generated" / "sample.txt"
+    manifest = json.loads(Path(result.output_manifest).read_text(encoding="utf-8"))
+    generated = Path(manifest["records"][0]["caption"])
     text = generated.read_text(encoding="utf-8")
     assert "visual 600x800" in text or "visual_600x800" in text
