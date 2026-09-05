@@ -4,6 +4,7 @@ from PIL import Image
 
 from pipeline.dataset.crop import plan_target_crop
 from pipeline.dataset.subject import SubjectObservation
+from pipeline.models import OptionalBackendUnavailable
 
 
 class StubDetector:
@@ -14,6 +15,11 @@ class StubDetector:
     def detect_path(self, path: Path):
         self.calls += 1
         return self.observation
+
+
+class UnavailableDetector:
+    def detect_path(self, path: Path):
+        raise OptionalBackendUnavailable("detector unavailable")
 
 
 def _image(path: Path, size=(1600, 1200)) -> None:
@@ -146,3 +152,18 @@ def test_tiny_source_skips_detector_because_crop_cannot_add_detail(tmp_path: Pat
     assert plan.crop_box is None
     assert plan.reason == "source_too_small_for_safe_crop"
     assert detector.calls == 0
+
+
+def test_detector_unavailable_keeps_original_as_conservative_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "character.png"
+    _image(source)
+
+    plan = plan_target_crop(
+        source,
+        target_type="character",
+        detector=UnavailableDetector(),
+    )
+
+    assert plan.crop_box is None
+    assert plan.mode == "keep"
+    assert plan.reason == "subject_detector_unavailable"
