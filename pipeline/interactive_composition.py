@@ -33,11 +33,13 @@ class InteractiveWizard(BaseInteractiveWizard):
             subject_report,
             selected_paths,
             output_dir,
+            maximum_saved_long_edge=self._training_max_long_edge,
+            maximum_saved_pixels=self._training_max_pixels,
         )
         self._render_composition_report(composition)
         payload = {
             **cluster_payload,
-            "identity_unit": "deepghs_person_crop",
+            "identity_unit": "trusted_input_deepghs_person_crop",
             "subject_detection": subject_report.as_dict(),
             "training_composition": composition.as_dict(),
             "selected_frames": len(discover_images(output_dir)),
@@ -51,7 +53,7 @@ class InteractiveWizard(BaseInteractiveWizard):
         interval_seconds = self._ask_positive_int("Sample one frame every N seconds", default=2)
         self._video_interval_seconds = interval_seconds
         max_frames = self._ask_positive_int(
-            "Maximum accepted frames before identity selection",
+            "Maximum accepted frames before subject materialization",
             default=250,
         )
         proxy = self._select_video_proxy(source)
@@ -67,10 +69,10 @@ class InteractiveWizard(BaseInteractiveWizard):
                 proxy=proxy,
             )
             self._render_video_report(report.as_dict())
-            training_dir, identity = self._select_video_identity(frame_dir)
+            training_dir, subject_selection = self._select_video_identity(frame_dir)
             processing = report.as_dict()
             processing.pop("downloaded_video", None)
-            processing["identity_preselection"] = identity
+            processing["subject_materialization"] = subject_selection
             processing["source_kind"] = "remote_url" if remote else "local_video"
             default_label = "online-video" if remote else Path(source).stem
             label = self._ask_text(
@@ -93,11 +95,7 @@ class InteractiveWizard(BaseInteractiveWizard):
                     workspace,
                     source_id,
                     records if isinstance(records, list) else [],
-                    selected_cluster=(
-                        int(identity["selected_cluster"])
-                        if identity.get("selected_cluster") is not None
-                        else None
-                    ),
+                    selected_cluster=None,
                 )
             else:
                 seed_source_defaults(workspace, source_id)
@@ -106,7 +104,7 @@ class InteractiveWizard(BaseInteractiveWizard):
     def _render_composition_report(self, report: EnrichedVideoCompositionReport) -> None:
         payload = report.as_dict()
         counts = payload["composition_counts"]
-        table = Table(title=self._b("最终训练构图平衡", "Final training composition balance"))
+        table = Table(title=self._b("最终训练构图", "Final training composition"))
         table.add_column(self._b("构图", "Composition"), style="bold")
         table.add_column(self._b("数量", "Count"), justify="right")
         labels = {
@@ -124,18 +122,22 @@ class InteractiveWizard(BaseInteractiveWizard):
             str(payload.get("full_variants_kept", 0)),
         )
         table.add_row(
-            self._b("crop 级近重复剔除", "Rejected crop-level near-duplicates"),
+            self._b("crop 级近重复跳过", "Crop-level near-duplicates skipped"),
             str(payload["rejected_near_duplicate"]),
         )
         table.add_row(
-            self._b("构图后尺寸过小剔除", "Rejected: too small after composition"),
+            self._b("构图后尺寸过小", "Too small after composition"),
             str(payload["rejected_too_small"]),
+        )
+        table.add_row(
+            self._b("约 1MP 归一化缩小", "Downscaled toward ~1MP"),
+            str(payload.get("downscaled_images", 0)),
         )
         self.console.print(table)
         self.console.print(
             self._b(
-                "[dim]每个人物默认只保留一个主要构图；只有高价值单人物全图才允许第二个 original_full 变体。不会制造多分辨率副本。[/dim]",
-                "[dim]Each subject gets one primary composition; only high-value single-character frames may add a second original_full variant. No artificial multi-resolution copies are created.[/dim]",
+                "[dim]每个主体默认只保留一个主要构图；只有高价值完整画面才允许第二个 original_full。所有过大图只会缩小，不会放大。[/dim]",
+                "[dim]Each subject gets one primary view; only high-value full frames may add an original_full variant. Oversized images are downscaled only; nothing is upscaled.[/dim]",
             )
         )
 
