@@ -8,8 +8,8 @@ from PIL import Image
 
 from pipeline.config import repository_root, sha256_file
 from pipeline.fingerprints import compute_step_signature
+from pipeline.materialization import run as materialize
 from pipeline.state import ProjectState
-from pipeline.steps import prepare
 
 
 def _repo(tmp_path, monkeypatch) -> tuple[Path, ProjectState]:
@@ -57,7 +57,7 @@ def _repo(tmp_path, monkeypatch) -> tuple[Path, ProjectState]:
     image = state.project_dir / "raw" / "sample.png"
     Image.new("RGB", (64, 64), "red").save(image)
     image.with_suffix(".txt").write_text("zz_fp, portrait\n", encoding="utf-8")
-    prepare.run(state)
+    materialize(state)
     return root, state
 
 
@@ -80,24 +80,19 @@ def _add_run(state: ProjectState, run_id: str, checkpoint_bytes: bytes) -> Path:
     return checkpoint
 
 
-def test_raw_and_caption_changes_have_distinct_fingerprints(tmp_path, monkeypatch) -> None:
+def test_raw_and_caption_changes_affect_materialization_fingerprint(tmp_path, monkeypatch) -> None:
     _, state = _repo(tmp_path, monkeypatch)
-    inspect_before = compute_step_signature(state, "inspect")
-    caption_before = compute_step_signature(
-        state, "caption", options={"mode": "existing_passthrough"}
-    )
+    options = {"caption_mode": "existing_passthrough"}
+    before = compute_step_signature(state, "materialize", options=options)
 
     (state.project_dir / "raw" / "sample.txt").write_text(
         "zz_fp, full body\n", encoding="utf-8"
     )
-    assert compute_step_signature(state, "inspect") == inspect_before
-    assert (
-        compute_step_signature(state, "caption", options={"mode": "existing_passthrough"})
-        != caption_before
-    )
+    after_caption = compute_step_signature(state, "materialize", options=options)
+    assert after_caption != before
 
     Image.new("RGB", (64, 64), "blue").save(state.project_dir / "raw" / "sample.png")
-    assert compute_step_signature(state, "inspect") != inspect_before
+    assert compute_step_signature(state, "materialize", options=options) != after_caption
 
 
 def test_base_and_training_profile_changes_invalidate_only_relevant_inputs(
@@ -106,69 +101,54 @@ def test_base_and_training_profile_changes_invalidate_only_relevant_inputs(
     _, state = _repo(tmp_path, monkeypatch)
     preflight_before = compute_step_signature(state, "preflight")
     train_before = compute_step_signature(state, "train")
-    prepare_before = compute_step_signature(state, "prepare")
+    materialize_before = compute_step_signature(state, "materialize")
 
     state.payload["project"]["base"] = "base_b"
     state.save()
     assert compute_step_signature(state, "preflight") != preflight_before
     assert compute_step_signature(state, "train") != train_before
-    assert compute_step_signature(state, "prepare") == prepare_before
+    assert compute_step_signature(state, "materialize") == materialize_before
 
     train_after_base = compute_step_signature(state, "train")
     state.payload["project"]["overrides"] = {"training": {"network_dim": 32}}
     state.save()
     assert compute_step_signature(state, "train") != train_after_base
-    assert compute_step_signature(state, "prepare") == prepare_before
+    assert compute_step_signature(state, "materialize") == materialize_before
 
 
-def test_evaluation_config_changes_only_evaluation_fingerprint(tmp_path, monkeypatch) -> None:
+def test_evaluation_config_does_not_change_project_fingerprints(tmp_path, monkeypatch) -> None:
     _, state = _repo(tmp_path, monkeypatch)
-    _add_run(state, "run-1", b"lora-one")
+    materialize_before = compute_step_signature(state, "materialize")
+    preflight_before = compute_step_signature(state, "preflight")
     train_before = compute_step_signature(state, "train")
-    evaluate_before = compute_step_signature(
-        state, "evaluate", options={"stage": "screening"}
-    )
 
     state.payload["project"]["overrides"] = {
         "evaluation": {"screening_prompts": ["portrait", "night"]}
     }
     state.save()
+
+    assert compute_step_signature(state, "materialize") == materialize_before
+    assert compute_step_signature(state, "preflight") == preflight_before
     assert compute_step_signature(state, "train") == train_before
-    assert (
-        compute_step_signature(state, "evaluate", options={"stage": "screening"})
-        != evaluate_before
-    )
 
 
-def test_validation_changes_only_evaluation_fingerprint(tmp_path, monkeypatch) -> None:
+def test_validation_changes_do_not_change_project_fingerprints(tmp_path, monkeypatch) -> None:
     _, state = _repo(tmp_path, monkeypatch)
-    _add_run(state, "run-1", b"lora-one")
+    materialize_before = compute_step_signature(state, "materialize")
+    preflight_before = compute_step_signature(state, "preflight")
     train_before = compute_step_signature(state, "train")
-    evaluation_before = compute_step_signature(
-        state, "evaluate", options={"stage": "screening", "run_id": "run-1"}
-    )
 
     validation = state.project_dir / "validation" / "holdout.png"
     Image.new("RGB", (64, 64), "green").save(validation)
+
+    assert compute_step_signature(state, "materialize") == materialize_before
+    assert compute_step_signature(state, "preflight") == preflight_before
     assert compute_step_signature(state, "train") == train_before
-    assert (
-        compute_step_signature(
-            state, "evaluate", options={"stage": "screening", "run_id": "run-1"}
-        )
-        != evaluation_before
-    )
 
 
-def test_selected_historical_run_is_part_of_evaluation_fingerprint(
-    tmp_path, monkeypatch
-) -> None:
+def test_results_history_is_not_part_of_project_fingerprint(tmp_path, monkeypatch) -> None:
     _, state = _repo(tmp_path, monkeypatch)
+    train_before = compute_step_signature(state, "train")
     _add_run(state, "run-1", b"lora-one")
     _add_run(state, "run-2", b"lora-two")
-    first = compute_step_signature(
-        state, "evaluate", options={"stage": "screening", "run_id": "run-1"}
-    )
-    second = compute_step_signature(
-        state, "evaluate", options={"stage": "screening", "run_id": "run-2"}
-    )
-    assert first != second
+    assert compute_step_signature(state, "train") == train_before
