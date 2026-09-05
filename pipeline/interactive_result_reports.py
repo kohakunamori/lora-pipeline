@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
+from .evaluation import promotion as promote
 from .models import PipelineError
 from .service import load_project, run_single_step
-from .steps import promote
 from .wizard import MenuItem
 
 
