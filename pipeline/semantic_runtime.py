@@ -49,6 +49,13 @@ def install_semantic_runtime_hooks() -> None:
 
 
 def _apply_semantic_captions(state, result: StepResult) -> StepResult:
+    """Apply semantic feature suppression without creating another trigger namespace.
+
+    TrainingConfig/TriggerPolicy owns the runtime trigger. Dataset character/outfit
+    tokens are retained only as metadata for grouping and compatibility; they are
+    removed if they appear in generated captions instead of being injected.
+    """
+
     project = state.payload.get("project", {})
     snapshot = project.get("dataset_semantics_snapshot")
     if not snapshot or project.get("type") != "character":
@@ -78,20 +85,32 @@ def _apply_semantic_captions(state, result: StepResult) -> StepResult:
         )
     )
     character = snapshot.get("character", {})
-    character_token = str(character.get("token") or project.get("trigger") or "").strip()
+    dataset_character_token = str(character.get("token") or "").strip()
     character_features = {normalize_tag(tag) for tag in character.get("features", [])}
     outfits = snapshot.get("outfits", {})
     bindings = snapshot.get("images", {})
+    trigger = str(project.get("trigger") or "").strip()
+    if not trigger:
+        raise PipelineError("Character training requires a non-empty TrainingConfig trigger")
+    anchors = [
+        str(value).strip()
+        for value in project.get("caption_anchor_tags", [])
+        if str(value).strip()
+    ]
     changed = 0
 
     for record in records:
         image_key = str(record.get("image") or "")
         outfit_id = str(bindings.get(image_key, {}).get("outfit") or "default")
         outfit = outfits.get(outfit_id, outfits.get("default", {}))
-        outfit_token = str(outfit.get("token") or "").strip()
+        dataset_outfit_token = str(outfit.get("token") or "").strip()
+        concept_tokens = {
+            normalize_tag(value)
+            for value in (dataset_character_token, dataset_outfit_token)
+            if value
+        }
         tags = parse_caption(str(record.get("text") or ""))
-        anchors = [str(value) for value in project.get("caption_anchor_tags", []) if str(value).strip()]
-        required_prefix = [value for value in (character_token, outfit_token) if value] + anchors
+        required_prefix = [trigger, *anchors]
         retained: list[str] = []
         seen: set[str] = set()
         for tag in required_prefix:
@@ -102,7 +121,12 @@ def _apply_semantic_captions(state, result: StepResult) -> StepResult:
         protected = len(retained)
         for tag in tags:
             normalized = normalize_tag(tag)
-            if not normalized or normalized in seen or normalized in character_features:
+            if (
+                not normalized
+                or normalized in seen
+                or normalized in character_features
+                or normalized in concept_tokens
+            ):
                 continue
             seen.add(normalized)
             retained.append(tag)
@@ -113,7 +137,7 @@ def _apply_semantic_captions(state, result: StepResult) -> StepResult:
             counts = count_sdxl_tokens(", ".join(retained))
         if counts.maximum > max_tokens:
             raise PipelineError(
-                "Required character/outfit/anchor prefix exceeds the configured "
+                "Required TrainingConfig trigger/anchor prefix exceeds the configured "
                 f"{max_tokens}-token budget"
             )
         text = ", ".join(retained)
@@ -131,9 +155,10 @@ def _apply_semantic_captions(state, result: StepResult) -> StepResult:
             "error": counts.error,
         }
         record["semantic_concepts"] = {
-            "character_token": character_token,
+            "training_trigger": trigger,
+            "dataset_character_token": dataset_character_token,
             "outfit": outfit_id,
-            "outfit_token": outfit_token,
+            "dataset_outfit_token": dataset_outfit_token,
         }
 
     manifest.pop("input_hash", None)

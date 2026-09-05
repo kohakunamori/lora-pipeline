@@ -11,6 +11,12 @@ from typing import Any, Mapping
 from ..config import read_yaml, sha256_file, stable_hash, write_json_atomic
 from ..dataset.caption_cleaner import caption_prefix
 from ..dataset.image_info import discover_images, unique_caption_relative
+from ..dataset.image_normalizer import (
+    DEFAULT_BUCKET_STEP,
+    DEFAULT_MAX_PIXELS,
+    normalize_training_image,
+    plan_training_image,
+)
 from ..models import PipelineError, StepResult
 from ..prepared import generation_path, generations_root, set_current_generation
 from ..state import ProjectState
@@ -56,6 +62,11 @@ def run(
         state.save()
     allow_fallback = bool(project.get("allow_trigger_only", False))
 
+    normalization = {
+        "max_pixels": DEFAULT_MAX_PIXELS,
+        "bucket_step": DEFAULT_BUCKET_STEP,
+        "no_upscale": True,
+    }
     planned: list[dict[str, object]] = []
     missing: list[str] = []
     for image in images:
@@ -87,11 +98,19 @@ def run(
             else:
                 missing.append(relative_text)
                 continue
+        image_plan = plan_training_image(
+            image,
+            max_pixels=DEFAULT_MAX_PIXELS,
+            bucket_step=DEFAULT_BUCKET_STEP,
+        )
         planned.append(
             {
                 "source": relative_text,
                 "source_image": image,
                 "source_image_sha256": sha256_file(image),
+                "source_size": list(image_plan.source_size),
+                "prepared_size": list(image_plan.target_size),
+                "downscaled": image_plan.downscaled,
                 "caption_bytes": caption_bytes,
                 "caption_source": caption_source,
                 "caption_sha256": hashlib.sha256(caption_bytes).hexdigest(),
@@ -109,7 +128,7 @@ def run(
         raise PipelineError("No images remain after exclusions")
 
     manifest_basis = {
-        "schema_version": 3,
+        "schema_version": 4,
         "images": [
             {
                 key: value
@@ -124,6 +143,7 @@ def run(
         "training_target_type": project.get("training_target_type", project.get("type")),
         "caption_mode": resolved_caption_mode,
         "allow_trigger_only": allow_fallback,
+        "image_normalization": normalization,
     }
     manifest_hash = stable_hash(manifest_basis)
     generation_id = manifest_hash
@@ -147,9 +167,13 @@ def run(
             for record in planned:
                 image_destination = stage / str(record["image"])
                 caption_destination = stage / str(record["caption"])
-                image_destination.parent.mkdir(parents=True, exist_ok=True)
+                normalize_training_image(
+                    Path(record["source_image"]),
+                    image_destination,
+                    max_pixels=DEFAULT_MAX_PIXELS,
+                    bucket_step=DEFAULT_BUCKET_STEP,
+                )
                 caption_destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(Path(record["source_image"]), image_destination)
                 caption_destination.write_bytes(bytes(record["caption_bytes"]))
             manifest = {
                 **manifest_basis,
@@ -183,6 +207,8 @@ def run(
             "fixed_prefix": list(fixed_prefix),
             "caption_mode": resolved_caption_mode,
             "caption_transform": caption_details,
+            "image_normalization": normalization,
+            "downscaled_images": sum(bool(record["downscaled"]) for record in planned),
             "trigger_only_captions": sum(
                 record["caption_source"] == "explicit-trigger-only"
                 for record in planned

@@ -18,7 +18,12 @@ _RUNTIME_HOOK_INSTALLED = False
 
 
 def target_caption_policy(target_type: str) -> dict[str, str]:
-    """Return the semantic caption ownership rules for one training target."""
+    """Return caption ownership rules for one training target.
+
+    TrainingConfig/TriggerPolicy is the only runtime trigger owner. Dataset semantic
+    tokens remain metadata for grouping and feature suppression; they are never
+    injected as a second trigger.
+    """
 
     if target_type == "character_outfit":
         return {
@@ -32,8 +37,9 @@ def target_caption_policy(target_type: str) -> dict[str, str]:
         }
     if target_type == "character":
         return {
-            "character_token": "always",
-            "outfit_token": "when_present",
+            "training_trigger": "always",
+            "character_token": "do_not_inject",
+            "outfit_token": "do_not_inject",
             "character_features": "suppress",
             "invariant_identity_tags": "suppress",
             "outfit_features": "suppress",
@@ -43,28 +49,23 @@ def target_caption_policy(target_type: str) -> dict[str, str]:
 
 
 def attach_target_aware_dataset_semantics_snapshot(state, workspace):
-    """Attach frozen dataset semantics without stealing an outfit LoRA trigger."""
+    """Attach frozen Dataset semantics without replacing the configured trigger."""
 
     if getattr(workspace, "concept_type", None) != "character":
         return state
     project = state.payload.get("project", {})
-    configured_trigger = str(project.get("trigger") or "")
+    configured_trigger = str(project.get("trigger") or "").strip()
+    if not configured_trigger:
+        raise PipelineError("Character training requires a TrainingConfig trigger")
+
     state = attach_dataset_semantics_snapshot(state, workspace)
     project = state.payload.get("project", {})
     target_type = str(project.get("training_target_type", project.get("type", "")))
+    project["trigger"] = configured_trigger
+    project["trigger_source"] = "training_config"
+    project.pop("training_config_trigger", None)
     project["semantic_caption_policy"] = target_caption_policy(target_type)
-
-    if target_type == "character_outfit":
-        restored = str(project.get("training_config_trigger") or configured_trigger).strip()
-        if not restored:
-            raise PipelineError("Character outfit training requires a TrainingConfig trigger")
-        project["trigger"] = restored
-        project["trigger_source"] = "training_config"
-        project.pop("training_config_trigger", None)
-        state.save()
-    else:
-        # attach_dataset_semantics_snapshot already saved; persist the refined target policy.
-        state.save()
+    state.save()
     return state
 
 
