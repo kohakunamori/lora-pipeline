@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import read_yaml, write_yaml_atomic
-from .models import ALL_STEP_NAMES, PROJECT_RUN_STEPS, StateError, StepResult, StepStatus
+from .models import (
+    LEGACY_PROJECT_STEPS,
+    PROJECT_RUN_STEPS,
+    STEP_ALIASES,
+    StateError,
+    StepResult,
+    StepStatus,
+)
 
 
 def utc_now() -> str:
@@ -46,7 +53,7 @@ class ProjectState:
             raise StateError(f"Project already exists: {project_dir}")
         now = utc_now()
         payload: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "project": {
                 "name": name,
                 "type": concept_type,
@@ -60,24 +67,18 @@ class ProjectState:
                 "overrides": {},
                 "allow_trigger_only": False,
             },
-            "steps": {step: {"status": StepStatus.PENDING.value, "attempts": 0} for step in ALL_STEP_NAMES},
+            "steps": {
+                step: {"status": StepStatus.PENDING.value, "attempts": 0}
+                for step in PROJECT_RUN_STEPS
+            },
+            "legacy_steps": {},
             "runs": [],
         }
-        if concept_type == "style":
-            payload["steps"]["identity"] = {
-                "status": StepStatus.SKIPPED.value,
-                "attempts": 0,
-                "reason": "N/A for style concepts",
-                "permanent": True,
-                "finished_at": now,
-            }
         project_dir.mkdir(parents=True, exist_ok=False)
         for relative in (
             "raw",
             "validation",
             "prepared/generations",
-            "review/duplicates",
-            "review/outliers",
             "review/captions",
             "cache",
             "runs",
@@ -102,7 +103,7 @@ class ProjectState:
     def _normalize(self) -> None:
         project = self.payload.setdefault("project", {})
         steps = self.payload.setdefault("steps", {})
-        self.payload.setdefault("schema_version", 1)
+        legacy = self.payload.setdefault("legacy_steps", {})
         self.payload.setdefault("runs", [])
         project.setdefault("overrides", {})
         project.setdefault("allow_trigger_only", False)
@@ -110,13 +111,26 @@ class ProjectState:
         if "unit" not in budget and "optimizer_steps" in budget:
             budget["unit"] = "legacy_optimizer_steps"
             budget["value"] = int(budget["optimizer_steps"])
-        for step in ALL_STEP_NAMES:
-            steps.setdefault(step, {"status": StepStatus.PENDING.value, "attempts": 0})
-            status = steps[step].get("status", StepStatus.PENDING.value)
+
+        # One-way state migration. ``prepare`` becomes canonical ``materialize``;
+        # Dataset curation and Results records are retained only as opaque history.
+        if "materialize" not in steps and "prepare" in steps:
+            steps["materialize"] = dict(steps["prepare"])
+        for name in tuple(steps):
+            if name in PROJECT_RUN_STEPS:
+                continue
+            if name in LEGACY_PROJECT_STEPS or name not in PROJECT_RUN_STEPS:
+                legacy.setdefault(name, steps.pop(name))
+
+        for name in PROJECT_RUN_STEPS:
+            steps.setdefault(name, {"status": StepStatus.PENDING.value, "attempts": 0})
+            status = steps[name].get("status", StepStatus.PENDING.value)
             try:
                 StepStatus(status)
             except ValueError as exc:
-                raise StateError(f"Invalid status {status!r} for step {step}") from exc
+                raise StateError(f"Invalid status {status!r} for step {name}") from exc
+
+        self.payload["schema_version"] = max(3, int(self.payload.get("schema_version", 1) or 1))
         if not project.get("name"):
             raise StateError(f"Project name is missing in {self.path}")
 
@@ -125,17 +139,19 @@ class ProjectState:
         write_yaml_atomic(self.path, self.payload)
 
     def step(self, name: str) -> dict[str, Any]:
-        if name not in ALL_STEP_NAMES:
-            raise StateError(f"Unknown step: {name}")
-        return self.payload["steps"][name]
+        canonical = STEP_ALIASES.get(name, name)
+        if canonical not in PROJECT_RUN_STEPS:
+            raise StateError(f"Unknown Project step: {name}")
+        return self.payload["steps"][canonical]
 
     def status(self, name: str) -> StepStatus:
         return StepStatus(self.step(name)["status"])
 
     def begin(self, name: str, *, input_hash: str, force: bool = False) -> bool:
+        canonical = STEP_ALIASES.get(name, name)
         if not input_hash:
-            raise StateError(f"Step {name} requires a non-empty input fingerprint")
-        record = self.step(name)
+            raise StateError(f"Step {canonical} requires a non-empty input fingerprint")
+        record = self.step(canonical)
         current = StepStatus(record["status"])
         if record.get("permanent") and current is StepStatus.SKIPPED:
             return False
@@ -144,7 +160,7 @@ class ProjectState:
             return False
         if current in {StepStatus.DONE, StepStatus.SKIPPED} and (force or not unchanged):
             reason = "forced rerun" if force else "input fingerprint changed"
-            self.invalidate_downstream(name, reason=reason)
+            self.invalidate_downstream(canonical, reason=reason)
         if current in {StepStatus.RUNNING, StepStatus.INTERRUPTED}:
             record["interrupted_at"] = utc_now()
         record.update(
@@ -161,9 +177,10 @@ class ProjectState:
         return True
 
     def finish(self, name: str, result: StepResult) -> None:
+        canonical = STEP_ALIASES.get(name, name)
         if result.status not in {StepStatus.DONE, StepStatus.SKIPPED}:
             raise StateError(f"A successful result cannot finish with {result.status}")
-        record = self.step(name)
+        record = self.step(canonical)
         record.update(
             {
                 "status": result.status.value,
@@ -176,7 +193,8 @@ class ProjectState:
         self.save()
 
     def fail(self, name: str, error: BaseException, *, log_path: Path | None = None) -> None:
-        record = self.step(name)
+        canonical = STEP_ALIASES.get(name, name)
+        record = self.step(canonical)
         record.update(
             {
                 "status": StepStatus.FAILED.value,
@@ -189,7 +207,8 @@ class ProjectState:
         self.save()
 
     def interrupt(self, name: str, error: BaseException | None = None) -> None:
-        record = self.step(name)
+        canonical = STEP_ALIASES.get(name, name)
+        record = self.step(canonical)
         record.update(
             {
                 "status": StepStatus.INTERRUPTED.value,
@@ -203,8 +222,9 @@ class ProjectState:
     def invalidate_downstream(self, name: str, *, reason: str) -> None:
         from .fingerprints import downstream_steps
 
+        canonical = STEP_ALIASES.get(name, name)
         now = utc_now()
-        for downstream in downstream_steps(name):
+        for downstream in downstream_steps(canonical):
             record = self.step(downstream)
             if record.get("permanent"):
                 continue
@@ -212,7 +232,7 @@ class ProjectState:
                 {
                     "status": StepStatus.PENDING.value,
                     "invalidated_at": now,
-                    "invalidation_reason": f"{name}: {reason}",
+                    "invalidation_reason": f"{canonical}: {reason}",
                 }
             )
             for key in (
@@ -225,16 +245,6 @@ class ProjectState:
                 "log_path",
             ):
                 record.pop(key, None)
-
-    def skip(self, name: str, reason: str, *, input_hash: str) -> None:
-        if name not in {"dedup", "identity", "caption", "review", "evaluate"}:
-            raise StateError(f"Step {name} is not optional")
-        if not self.begin(name, input_hash=input_hash):
-            return
-        self.finish(
-            name,
-            StepResult(status=StepStatus.SKIPPED, input_hash=input_hash, details={"reason": reason}),
-        )
 
     def skip_preflight(self, reason: str, *, input_hash: str) -> None:
         """Record the expert-only preflight bypass without making it generally optional."""
@@ -318,8 +328,9 @@ def execute_step(
     input_hash: str,
     force: bool = False,
 ) -> StepResult:
-    if not state.begin(name, input_hash=input_hash, force=force):
-        record = state.step(name)
+    canonical = STEP_ALIASES.get(name, name)
+    if not state.begin(canonical, input_hash=input_hash, force=force):
+        record = state.step(canonical)
         return StepResult(
             status=StepStatus(record["status"]),
             input_hash=record.get("input_hash"),
@@ -329,10 +340,10 @@ def execute_step(
     try:
         result = handler()
     except (KeyboardInterrupt, SystemExit) as exc:
-        state.interrupt(name, exc)
+        state.interrupt(canonical, exc)
         raise
     except BaseException as exc:
-        state.fail(name, exc, log_path=getattr(exc, "log_path", None))
+        state.fail(canonical, exc, log_path=getattr(exc, "log_path", None))
         raise
     details = dict(result.details)
     if result.input_hash and result.input_hash != input_hash:
@@ -343,7 +354,7 @@ def execute_step(
         output_manifest=result.output_manifest,
         details=details,
     )
-    state.finish(name, normalized)
+    state.finish(canonical, normalized)
     return normalized
 
 
