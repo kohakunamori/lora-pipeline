@@ -5,6 +5,7 @@ from typing import Mapping
 
 from .caption_core import *  # noqa: F401,F403
 from .caption_core import run as _run_core
+from ..activation_caption import apply_activation_group_captions
 from ..caption_policy import apply_target_caption_policy
 from ..dataset.tagger import ImgutilsWdTagger, TagResult, TaggerBackend
 from ..style_caption_policy import apply_style_caption_policy
@@ -40,7 +41,8 @@ def run(state, *args, **kwargs):
 
     Dataset identity/outfit semantic metadata no longer owns runtime caption
     composition. The protected TriggerPolicy prefix comes from TrainingConfig;
-    CaptionPolicy only decides which stable visual attributes remain explicit.
+    CaptionPolicy decides which stable visual attributes remain explicit, and a
+    frozen ActivationRecipe may add one learned group_tag per image.
     """
 
     visual_overrides = kwargs.pop("tag_image_overrides", None)
@@ -54,4 +56,5 @@ def run(state, *args, **kwargs):
 
     result = _run_core(state, *args, **kwargs)
     result = apply_target_caption_policy(state, result)
+    result = apply_activation_group_captions(state, result)
     return apply_style_caption_policy(state, result)

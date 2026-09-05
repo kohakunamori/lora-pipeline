@@ -1,35 +1,18 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
 from .config import resolve_profiles, stable_hash, write_json_atomic
-from .dataset.caption_cleaner import CATEGORY_PATTERNS, normalize_tag, parse_caption
+from .dataset.caption_cleaner import normalize_tag, parse_caption
+from .dataset.tag_categories import is_identity_tag, is_outfit_tag
 from .models import PipelineError, StepResult, StepStatus
 from .tokenizers import count_sdxl_tokens
 
 CHARACTER_CAPTION_POLICIES = ("strong_identity", "balanced", "controllable")
 STYLE_CAPTION_POLICY = "content_rich"
-
-_IDENTITY_PATTERNS = (
-    re.compile(
-        r"^(?:black|blonde|brown|red|blue|green|purple|pink|white|grey|gray|silver|"
-        r"aqua|orange|multicolored|two-tone) hair$"
-    ),
-    re.compile(
-        r"^(?:black|brown|red|blue|green|purple|pink|yellow|gold|golden|white|grey|"
-        r"gray|silver|aqua|orange) eyes$"
-    ),
-    re.compile(
-        r"^(?:very long hair|long hair|medium hair|short hair|twintails|twin tails|"
-        r"ponytail|side ponytail|braid|double braid|single braid|bob cut|hime cut|"
-        r"straight hair|wavy hair|curly hair|ahoge|blunt bangs|bangs|hair over one eye|"
-        r"heterochromia)$"
-    ),
-)
 
 _POLICY_THRESHOLDS: dict[str, tuple[float, float]] = {
     # Strong identity deliberately lets protected triggers absorb stable visual
@@ -127,7 +110,7 @@ def apply_target_caption_policy(state, result: StepResult) -> StepResult:
     identity_tags = _invariant_tags(
         records,
         minimum_coverage=identity_min,
-        predicate=_is_identity_tag,
+        predicate=is_identity_tag,
     )
     # Generic character training keeps clothing explicit so a single/default outfit
     # does not silently bind itself to the character trigger. Outfit targets do the
@@ -136,7 +119,7 @@ def apply_target_caption_policy(state, result: StepResult) -> StepResult:
         _invariant_tags(
             records,
             minimum_coverage=outfit_min,
-            predicate=_is_outfit_tag,
+            predicate=is_outfit_tag,
         )
         if target_type == "character_outfit"
         else set()
@@ -245,11 +228,3 @@ def _invariant_tags(
         for tag, count in counts.items()
         if count / total >= minimum_coverage and predicate(tag)
     }
-
-
-def _is_identity_tag(tag: str) -> bool:
-    return any(pattern.fullmatch(tag) for pattern in _IDENTITY_PATTERNS)
-
-
-def _is_outfit_tag(tag: str) -> bool:
-    return any(pattern.search(tag) for pattern in CATEGORY_PATTERNS.get("outfit", ()))
