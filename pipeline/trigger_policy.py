@@ -68,7 +68,7 @@ def resolve_trigger_policy(
         )
     requested = re.sub(r"\s+", " ", str(requested).strip())
     if not requested or "," in requested or "\n" in requested:
-        raise PipelineError("Trigger must be non-empty and cannot contain commas/newlines")
+        raise PipelineError("Trigger must be non-empty and cannot contain a comma or newline")
 
     if strategy == "rare_token":
         slug = re.sub(r"[^A-Za-z0-9_]+", "_", requested).strip("_").casefold()
