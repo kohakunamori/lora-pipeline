@@ -45,13 +45,12 @@ def test_home_is_a_dashboard_and_can_exit_without_creating_a_project(tmp_path, m
     assert not (tmp_path / "projects").exists()
 
 
-def test_guided_workflow_preferences_are_saved_in_project_state(tmp_path, monkeypatch) -> None:
+def test_guided_workflow_preferences_only_configure_materialization(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LORA_PIPELINE_ROOT", str(tmp_path))
     state = _state(tmp_path)
     console, _ = _console()
     wizard = Wizard(console=console)
-    confirms = iter([False, False, True, False, False])
-    monkeypatch.setattr(wizard, "_confirm", lambda *args, **kwargs: next(confirms))
+    monkeypatch.setattr(wizard, "_confirm", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         wizard,
         "_menu",
@@ -62,12 +61,10 @@ def test_guided_workflow_preferences_are_saved_in_project_state(tmp_path, monkey
 
     reloaded = ProjectState.load(state.project_dir)
     assert preferences == reloaded.payload["project"]["interactive_preferences"]
-    assert preferences["run_dedup"] is False
-    assert preferences["run_identity"] is False
-    assert preferences["caption_mode"] == "existing_passthrough"
-    assert preferences["allow_trigger_only"] is True
-    assert preferences["run_review"] is False
-    assert preferences["run_screening_evaluation"] is False
+    assert preferences == {
+        "caption_mode": "existing_passthrough",
+        "allow_trigger_only": True,
+    }
 
 
 def test_new_project_can_be_created_entirely_through_prompt_wrappers(tmp_path, monkeypatch) -> None:
