@@ -46,15 +46,24 @@ def set_current_generation(
     image_count: int,
 ) -> Path:
     path = current_pointer_path(project_dir)
-    write_json_atomic(
-        path,
-        {
-            "schema_version": 1,
-            "generation_id": generation_id,
-            "manifest_hash": manifest_hash,
-            "image_count": image_count,
-        },
-    )
+    generation_root = generation_path(project_dir, generation_id)
+    preview_rel: str | None = None
+    manifest_path = generation_root / "manifest.json"
+    if manifest_path.is_file():
+        from .materialization.preview import write_generation_preview
+
+        preview_path = write_generation_preview(project_dir, generation_root)
+        preview_rel = preview_path.relative_to(project_dir).as_posix()
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "generation_id": generation_id,
+        "manifest_hash": manifest_hash,
+        "image_count": image_count,
+    }
+    if preview_rel is not None:
+        payload["preview"] = preview_rel
+    write_json_atomic(path, payload)
     return path
 
 
