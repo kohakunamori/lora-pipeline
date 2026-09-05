@@ -24,6 +24,7 @@ dependencies = [
 lora-pipeline = "pipeline.interactive:main"
 lora-pipeline-web = "pipeline.web_full:main"
 lora-dataset-optimize = "pipeline.dataset_optimizer:main"
+lora-dataset-acquisition = "pipeline.dataset_acquisition:main"
 
 [tool.setuptools.packages.find]
 include = ["pipeline*"]
