@@ -30,7 +30,11 @@ def test_materialization_smart_crop_activates_derived_and_disables_original(
     def fake_materialize(frame_dir: Path):
         output = frame_dir.parent / "selected-character"
         _image(output / "crop-a.jpg", "blue")
-        return output, {"status": "identity_assumed_valid", "selected_subjects": 1}
+        return output, {
+            "status": "identity_assumed_valid",
+            "identity_assumed_valid": True,
+            "selected_subjects": 1,
+        }
 
     monkeypatch.setattr(wizard, "_select_video_identity", fake_materialize)
     wizard._smart_crop_source(workspace, str(source["id"]))
