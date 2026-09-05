@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 
-from . import interactive_metadata_hooks as _interactive_metadata_hooks  # noqa: F401
 from .i18n import initialize_interactive
 from .interactive_local_video_import import install_local_video_import_modes
 from .interactive_materialization import InteractiveWizard
