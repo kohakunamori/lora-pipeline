@@ -21,7 +21,6 @@ from .dataset_semantics import (
 from .dataset_workspace import DatasetWorkspace
 from .interactive_bulk_selection import InteractiveWizard as BaseInteractiveWizard
 from .interactive_multiselect import MultiSelectOption, select_many
-from . import semantic_project_hooks as _semantic_project_hooks  # noqa: F401
 from .wizard import MenuItem
 
 
