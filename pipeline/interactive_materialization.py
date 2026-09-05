@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from .dataset_workspace import DatasetWorkspace
@@ -12,9 +13,9 @@ class InteractiveWizard(BaseInteractiveWizard):
     """Narrow final Dataset UX to the materialization contract.
 
     Identity is trusted at ingestion. The normal path is therefore:
-    import -> optional subject crop -> sanity check/tag/edit -> TrainingConfig ->
-    prepared ~1MP generation. Legacy pHash/CCIP/advanced curation functions remain
-    importable for old workspaces but are intentionally absent from this menu.
+    import -> subject crop -> sanity check/tag/edit -> TrainingConfig -> prepared
+    ~1MP generation. Legacy pHash/CCIP/advanced curation functions remain importable
+    for old workspaces but are intentionally absent from this menu.
     """
 
     def dataset_dashboard(self, name: str) -> None:
@@ -28,8 +29,8 @@ class InteractiveWizard(BaseInteractiveWizard):
                         "import",
                         self._b("导入素材", "Import material"),
                         self._b(
-                            "人物图片会默认尝试主体检测/智能裁剪；视频继续抽帧后走同一主体流程。",
-                            "Character images automatically attempt subject detection/smart crop; video frames use the same subject path.",
+                            "人物图片会默认执行主体检测/智能裁剪；视频抽帧后走同一主体流程。",
+                            "Character images automatically run subject detection/smart crop; video frames use the same subject path.",
                         ),
                     ),
                     MenuItem(
@@ -132,11 +133,62 @@ class InteractiveWizard(BaseInteractiveWizard):
         try:
             self._smart_crop_source(workspace, source_id)
         except PipelineError as exc:
-            # The imported source remains enabled and usable. Subject materialization
-            # is an optimization, not a gate, because input identity is trusted.
             self.console.print(
                 self._b(
                     f"[yellow]自动主体裁剪未完成，已保留原始来源：{exc}[/yellow]",
                     f"[yellow]Automatic subject crop did not complete; original source retained: {exc}[/yellow]",
                 )
             )
+
+    def _smart_crop_source(self, workspace: DatasetWorkspace, source_id: str) -> None:
+        """Create one derived subject-crop source with no extra confirmation prompts."""
+
+        source = workspace.sources[source_id]
+        work_root = workspace.dataset_dir / "cache" / "work"
+        work_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"crop-{source_id}-", dir=work_root) as temporary:
+            frame_dir = Path(temporary) / "frames"
+            count = workspace.export_source_active(source_id, frame_dir)
+            if count == 0:
+                raise PipelineError(
+                    self._b(
+                        "这个来源没有可裁切的未排除图片。",
+                        "This source has no non-excluded images to crop.",
+                    )
+                )
+            training_dir, materialization = self._select_video_identity(frame_dir)
+
+            # Detector/model failure deliberately returns the exported originals.
+            # Do not manufacture a duplicate smart_crop source in that case.
+            if training_dir.resolve() == frame_dir.resolve():
+                self.console.print(
+                    self._b(
+                        "[yellow]未生成主体裁切；原来源继续启用。[/yellow]",
+                        "[yellow]No subject crop was generated; the original source remains enabled.[/yellow]",
+                    )
+                )
+                return
+
+            label = f"{source.get('label', source_id)}-crop"
+            record = workspace.add_source_from_directory(
+                training_dir,
+                kind="smart_crop",
+                label=label,
+                origin=f"derived:{source_id}",
+                parent_source=source_id,
+                processing={
+                    "subject_materialization": materialization,
+                    "input_images": count,
+                },
+            )
+
+        # A successful derived crop becomes the active representation. The original
+        # remains on disk and can be re-enabled from the source manager at any time.
+        workspace.set_source_enabled(source_id, False)
+        self._render_source_imported(record)
+        self.console.print(
+            self._b(
+                f"[green]已自动启用裁切来源 {record['id']}，并停用原来源 {source_id}。[/green]",
+                f"[green]Enabled crop source {record['id']} and disabled original source {source_id} automatically.[/green]",
+            )
+        )
