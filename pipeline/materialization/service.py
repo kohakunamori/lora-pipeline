@@ -5,11 +5,13 @@ import json
 import os
 import shutil
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
 from ..config import read_yaml, sha256_file, stable_hash, write_json_atomic
 from ..dataset.caption_cleaner import caption_prefix
+from ..dataset.crop import CROP_POLICY_VERSION, plan_target_crop
 from ..dataset.image_info import discover_images, unique_caption_relative
 from ..dataset.image_normalizer import (
     DEFAULT_BUCKET_STEP,
@@ -17,6 +19,7 @@ from ..dataset.image_normalizer import (
     normalize_training_image,
     plan_training_image,
 )
+from ..dataset.subject import SubjectDetector
 from ..models import PipelineError, StepResult
 from ..prepared import generation_path, generations_root, set_current_generation
 from ..state import ProjectState
@@ -34,10 +37,10 @@ def run(
     project = state.payload["project"]
     resolved_caption_mode = _resolve_caption_mode(project, caption_mode)
 
-    # Caption generation/normalization is a transform of the frozen training
-    # input, not an independent training lifecycle stage. Keep the existing
-    # caption implementation as a compatibility utility, but invoke it directly
-    # here so the prepared generation owns the effective captions it trains on.
+    # Captions still use the existing compatibility transform in this phase. The
+    # visual side is now target-aware and deterministic; the follow-up phase moves
+    # generated tagging onto these transformed images so tag semantics also reflect
+    # the final crop.
     caption_details: dict[str, Any] = {}
     if resolved_caption_mode != "skip":
         from . import caption as caption_step
@@ -62,11 +65,25 @@ def run(
         state.save()
     allow_fallback = bool(project.get("allow_trigger_only", False))
 
+    target_type = str(project.get("training_target_type", project.get("type", "")))
+    if target_type not in {"character", "character_outfit", "style"}:
+        raise PipelineError(f"Unsupported training target for materialization: {target_type}")
+    detector = SubjectDetector() if target_type != "style" else None
+
     normalization = {
         "max_pixels": DEFAULT_MAX_PIXELS,
         "bucket_step": DEFAULT_BUCKET_STEP,
         "no_upscale": True,
+        "order": ["target_crop", "downscale"],
     }
+    crop_policy = {
+        "version": CROP_POLICY_VERSION,
+        "target_type": target_type,
+        "character": "subject_aware",
+        "character_outfit": "outfit_preserving",
+        "style": "composition_preserving",
+    }
+
     planned: list[dict[str, object]] = []
     missing: list[str] = []
     for image in images:
@@ -98,8 +115,15 @@ def run(
             else:
                 missing.append(relative_text)
                 continue
+
+        crop = plan_target_crop(
+            image,
+            target_type=target_type,
+            detector=detector,
+        )
         image_plan = plan_training_image(
             image,
+            crop_box=crop.crop_box,
             max_pixels=DEFAULT_MAX_PIXELS,
             bucket_step=DEFAULT_BUCKET_STEP,
         )
@@ -109,8 +133,11 @@ def run(
                 "source_image": image,
                 "source_image_sha256": sha256_file(image),
                 "source_size": list(image_plan.source_size),
+                "crop_size": list(image_plan.input_size),
                 "prepared_size": list(image_plan.target_size),
+                "cropped": image_plan.cropped,
                 "downscaled": image_plan.downscaled,
+                "crop": crop.as_dict(),
                 "caption_bytes": caption_bytes,
                 "caption_source": caption_source,
                 "caption_sha256": hashlib.sha256(caption_bytes).hexdigest(),
@@ -128,7 +155,7 @@ def run(
         raise PipelineError("No images remain after exclusions")
 
     manifest_basis = {
-        "schema_version": 4,
+        "schema_version": 5,
         "images": [
             {
                 key: value
@@ -140,9 +167,10 @@ def run(
         "excluded": sorted(exclusions),
         "trigger": trigger,
         "fixed_prefix": list(fixed_prefix),
-        "training_target_type": project.get("training_target_type", project.get("type")),
+        "training_target_type": target_type,
         "caption_mode": resolved_caption_mode,
         "allow_trigger_only": allow_fallback,
+        "crop_policy": crop_policy,
         "image_normalization": normalization,
     }
     manifest_hash = stable_hash(manifest_basis)
@@ -167,9 +195,21 @@ def run(
             for record in planned:
                 image_destination = stage / str(record["image"])
                 caption_destination = stage / str(record["caption"])
+                crop_record = record.get("crop", {})
+                raw_box = (
+                    crop_record.get("crop_box")
+                    if isinstance(crop_record, Mapping)
+                    else None
+                )
+                crop_box = (
+                    tuple(int(value) for value in raw_box)
+                    if isinstance(raw_box, list) and len(raw_box) == 4
+                    else None
+                )
                 normalize_training_image(
                     Path(record["source_image"]),
                     image_destination,
+                    crop_box=crop_box,
                     max_pixels=DEFAULT_MAX_PIXELS,
                     bucket_step=DEFAULT_BUCKET_STEP,
                 )
@@ -194,6 +234,11 @@ def run(
         manifest_hash=manifest_hash,
         image_count=len(planned),
     )
+    crop_reasons = Counter(
+        str(record.get("crop", {}).get("reason", "unknown"))
+        for record in planned
+        if isinstance(record.get("crop"), Mapping)
+    )
     return StepResult(
         input_hash=manifest_hash,
         output_manifest=str(manifest_path),
@@ -207,6 +252,9 @@ def run(
             "fixed_prefix": list(fixed_prefix),
             "caption_mode": resolved_caption_mode,
             "caption_transform": caption_details,
+            "crop_policy": crop_policy,
+            "cropped_images": sum(bool(record["cropped"]) for record in planned),
+            "crop_reasons": dict(sorted(crop_reasons.items())),
             "image_normalization": normalization,
             "downscaled_images": sum(bool(record["downscaled"]) for record in planned),
             "trigger_only_captions": sum(
