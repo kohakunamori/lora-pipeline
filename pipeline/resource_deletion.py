@@ -13,7 +13,7 @@ from .service import project_path
 from .state import ProjectState, utc_now
 from .training_config import (
     TrainingConfig,
-    create_project_from_training_config as _create_project_from_training_config,
+    create_project_from_training_config,
     training_configs_root,
 )
 
@@ -25,18 +25,14 @@ def guarded_create_project_from_training_config(
     project_name: str,
     root: Path | None = None,
 ):
-    """Freeze a fresh Dataset + Config snapshot while deletion is serialized."""
+    """Compatibility name for the canonical atomic Project factory."""
 
-    resolved = (root or repository_root()).resolve()
-    with lifecycle_lock(resolved):
-        fresh_workspace = DatasetWorkspace.load(workspace.name, root=resolved)
-        fresh_config = TrainingConfig.load(config.name, root=resolved)
-        return _create_project_from_training_config(
-            fresh_workspace,
-            fresh_config,
-            project_name=project_name,
-            root=resolved,
-        )
+    return create_project_from_training_config(
+        workspace,
+        config,
+        project_name=project_name,
+        root=root,
+    )
 
 
 def delete_training_config(name: str, *, root: Path | None = None) -> dict[str, Any]:
@@ -86,7 +82,7 @@ def delete_training_run(
     *,
     root: Path | None = None,
 ) -> dict[str, Any]:
-    """Delete one finished Run and its artifacts without deleting its Project."""
+    """Delete one finished Run and all of its run-scoped Results artifacts."""
 
     resolved = (root or repository_root()).resolve()
     with lifecycle_lock(resolved):
@@ -117,7 +113,7 @@ def delete_training_run(
         original_runs = state.payload.get("runs", [])
         state.payload["runs"] = [item for item in runs if str(item.get("id")) != run_id]
         try:
-            _invalidate_run_backed_steps(state, run_id, run_dir)
+            _invalidate_train_pointer(state, run_id, run_dir)
             state.save()
         except BaseException:
             state.payload["runs"] = original_runs
@@ -135,32 +131,34 @@ def delete_training_run(
         }
 
 
-def _invalidate_run_backed_steps(state: ProjectState, run_id: str, run_dir: Path) -> None:
-    """Reset pipeline step pointers only when they reference the deleted Run."""
+def _invalidate_train_pointer(state: ProjectState, run_id: str, run_dir: Path) -> None:
+    """Reset the train step only when it points at the deleted Run.
 
-    needle = str(run_dir)
-    for step_name in ("train", "evaluate"):
-        record = state.step(step_name)
-        reference = json.dumps(
-            {
-                "output_manifest": record.get("output_manifest"),
-                "details": record.get("details"),
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-        if run_id not in reference and needle not in reference:
-            continue
-        attempts = int(record.get("attempts", 0))
-        record.clear()
-        record.update(
-            {
-                "status": StepStatus.PENDING.value,
-                "attempts": attempts,
-                "invalidated_at": utc_now(),
-                "invalidation_reason": f"run {run_id} was permanently deleted",
-            }
-        )
+    Evaluation and promotion are stored inside the Run itself, so deleting the Run
+    removes those Results without touching the Project step namespace.
+    """
+
+    record = state.step("train")
+    reference = json.dumps(
+        {
+            "output_manifest": record.get("output_manifest"),
+            "details": record.get("details"),
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+    if run_id not in reference and str(run_dir) not in reference:
+        return
+    attempts = int(record.get("attempts", 0))
+    record.clear()
+    record.update(
+        {
+            "status": StepStatus.PENDING.value,
+            "attempts": attempts,
+            "invalidated_at": utc_now(),
+            "invalidation_reason": f"run {run_id} was permanently deleted",
+        }
+    )
 
 
 def _directory_size(path: Path) -> int:
