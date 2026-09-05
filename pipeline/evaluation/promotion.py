@@ -6,7 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..activation_recipe import (
+    activation_safetensors_metadata,
+    activation_usage_hint,
+    public_activation_recipe,
+)
 from ..config import load_base_registry, sha256_file, write_yaml_atomic
+from ..model_artifact import rewrite_safetensors_metadata
 from ..models import PipelineError
 from ..state import ProjectState
 
@@ -60,13 +66,28 @@ def run(
         shutil.copy2(checkpoint, destination)
 
     project = state.payload["project"]
+    activation_snapshot = project.get("activation_recipe")
+    activation = (
+        public_activation_recipe(activation_snapshot)
+        if isinstance(activation_snapshot, dict)
+        else None
+    )
+    metadata_updates: dict[str, str] = {
+        "modelspec.trigger_phrase": str(project["trigger"]),
+    }
+    if isinstance(activation_snapshot, dict):
+        metadata_updates.update(activation_safetensors_metadata(activation_snapshot))
+        metadata_updates["modelspec.usage_hint"] = activation_usage_hint(activation_snapshot)
+    rewrite_safetensors_metadata(destination, metadata_updates)
+
     base = load_base_registry()[str(project["base"])]
     accounting = dict(run_record.get("accounting", {}))
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "project": state.name,
         "type": state.concept_type,
         "trigger": project["trigger"],
+        "activation": activation,
         "base": {
             "id": base.id,
             "filename": base.path.name,
@@ -94,6 +115,7 @@ def run(
         "artifacts": {
             "source_checkpoint": str(checkpoint),
             "promoted_lora": str(destination),
+            "promoted_lora_sha256": sha256_file(destination),
         },
     }
     metadata = run_dir / "best.yaml"
