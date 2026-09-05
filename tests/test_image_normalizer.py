@@ -45,3 +45,24 @@ def test_plan_preserves_orientation_without_upscale() -> None:
     assert landscape.target_size == tuple(reversed(portrait.target_size))
     assert landscape.target_size[0] > landscape.target_size[1]
     assert portrait.target_size[1] > portrait.target_size[0]
+
+
+def test_crop_happens_before_downscale(tmp_path: Path) -> None:
+    source = tmp_path / "large.png"
+    destination = tmp_path / "prepared" / "large.png"
+    Image.new("RGB", (3000, 2000), "green").save(source)
+
+    # The selected crop is already below the one-megapixel budget, so cropping
+    # should remove the need for a second resize even though the raw source is 6 MP.
+    plan = normalize_training_image(
+        source,
+        destination,
+        crop_box=(1050, 500, 1950, 1500),
+    )
+
+    assert plan.cropped is True
+    assert plan.input_size == (900, 1000)
+    assert plan.target_size == (900, 1000)
+    assert plan.downscaled is False
+    with Image.open(destination) as prepared:
+        assert prepared.size == (900, 1000)
