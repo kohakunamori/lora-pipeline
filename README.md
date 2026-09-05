@@ -1,7 +1,7 @@
 # LoRA Pipeline
 
-A resumable, interactive pipeline for Character and Style LoRA training on local
-Illustrious/SDXL checkpoints. Training is delegated to a pinned
+A resumable, CLI/TUI-first pipeline for Character and Style LoRA training on
+local Illustrious/SDXL checkpoints. Training is delegated to a pinned
 [`sd-scripts`](https://github.com/kohya-ss/sd-scripts) checkout; this repository
 does not implement a custom SDXL training loop.
 
@@ -10,14 +10,18 @@ PyTorch SDPA, 1024-area buckets, and profile-driven dataloader settings. The
 pipeline does not install, upgrade, or calibrate PyTorch, CUDA, NVIDIA drivers,
 or `sd-scripts`. Those are deployment responsibilities.
 
+> The former Web UI, Web worker, and Web job surface has been removed and is no
+> longer maintained. Supported interactive use is the terminal UI plus CLI/core
+> APIs.
+
 ## Architecture
 
-The workflow is deliberately split into three lifecycles:
+The workflow is deliberately split into three ownership boundaries:
 
 ```text
 Dataset Workspace                Training Project                 Results
 -----------------                ----------------                 -------
-import / video ingest     ->      prepare (materialize)    ->      screening
+import / video ingest     ->      materialize              ->      screening
 inspect / audit                   preflight                       full evaluation
 dedup / identity                 train                           human promote
 tag / edit / exclude
@@ -25,27 +29,42 @@ tag / edit / exclude
         +-- immutable Dataset snapshot + TrainingConfig snapshot
 ```
 
-Dataset curation is not replayed as a Project training state machine. A Project
-freezes the selected dataset/config inputs, materializes the effective training
-captions and images, validates them, and trains. Evaluation is a repeatable
-operation on a completed run and is not required for the training lifecycle to
-be considered complete.
+Dataset curation is not replayed as a Project state machine. A Project freezes
+the selected Dataset and TrainingConfig inputs, materializes the effective
+training images/captions, validates them, and trains. Evaluation and promotion
+are repeatable operations on completed Runs and are not required for the
+training lifecycle to be complete.
+
+The canonical Project state machine is exactly:
+
+```text
+materialize -> preflight -> train
+```
+
+Historical Project YAML may contain `inspect`, `dedup`, `identity`, `caption`,
+`review`, `prepare`, or `evaluate` records. They are migrated into opaque
+compatibility history when loaded and are never replayed by normal orchestration.
+`prepare` remains only as a deprecated alias for `materialize` for old callers.
 
 ## Design guarantees
 
-- Files under `projects/*/raw/` are never modified or deleted by the pipeline.
-- Dataset inspection/curation belongs to `DatasetWorkspace`; frozen Projects do
-  not normally rerun inspect, duplicate, identity, or review stages.
-- Prepared datasets are immutable, content-addressed generations under
+- Files under `projects/*/raw/` are immutable frozen inputs.
+- Dataset inspection, dedup, identity analysis, tagging, editing, and exclusion
+  belong to `DatasetWorkspace`, not Project stages.
+- Fresh Dataset curation evidence may be copied into a Project snapshot for
+  preflight/reporting, but it is never registered as a Project step.
+- Materialized datasets are immutable, content-addressed generations under
   `prepared/generations/<manifest-hash>/`.
-- A completed training stage is reused only when its effective input fingerprint
+- A completed Project stage is reused only while its effective input fingerprint
   still matches. Input changes invalidate only dependent downstream stages.
 - Character and Style are separate concept profiles. CCIP identity logic does
   not run for Style datasets.
-- Training budget is expressed canonically as `images_seen`, so Quality batch 1
-  and Fast batch 2 are compared at equal image exposure rather than equal step
-  count.
-- Generated evaluation images have stable case IDs. They are never paired to
+- Training budget is expressed canonically as `images_seen`, so different batch
+  strategies are compared at equal image exposure rather than equal optimizer
+  step count.
+- Evaluation is Run-scoped. Validation images and evaluation settings do not
+  mutate or invalidate the Project training lifecycle.
+- Generated evaluation images use stable case IDs and are never paired to
   prompts or metrics by sorted filename order.
 - Evaluation never silently declares a winner. `best.safetensors` exists only
   after an explicit human `promote` action.
@@ -70,12 +89,28 @@ cp environment/environment-info.example.json environment/environment-info.json
 
 The runtime pipeline never edits this environment or installs packages.
 
+## Entry points
+
+Interactive terminal UI:
+
+```bash
+./lora
+```
+
+CLI:
+
+```bash
+./lora --help
+```
+
+There is intentionally no Web UI entry point.
+
 ## Register base checkpoints
 
 ```bash
 ./lora base add one_obsession_v19 /models/one-obsession-v19.safetensors
 ./lora base inspect one_obsession_v19
-./lora base verify one_obsession_v19   # explicit full-file verification
+./lora base verify one_obsession_v19
 ./lora base list
 ```
 
@@ -83,20 +118,24 @@ The registry caches a full SHA256 together with a file stat signature. If the
 checkpoint content changes, preflight blocks instead of silently accepting the
 new file under the old base identity.
 
-## Dataset curation
+## Dataset Workspace
 
-The preferred workflow is to curate reusable data in a Dataset Workspace before
-creating a training run. Import sources, audit images, resolve duplicates and
-character identity issues where applicable, generate/edit captions, and exclude
-bad samples there. Video extraction and identity selection also terminate in the
-Dataset layer rather than becoming Project training stages.
+The preferred workflow is to curate reusable data before creating a Training
+Project. Import sources, audit images, resolve duplicates and character identity
+issues where applicable, generate/edit captions, and exclude bad samples in the
+Dataset Workspace. Video extraction and subject selection also terminate in the
+Dataset layer.
 
 A Dataset snapshot records the active image set, hashes, captions, inspection
-metadata, and reusable curation analyses. Creating a Project from that Dataset
-freezes the snapshot so later Dataset edits do not silently change an existing
-training run.
+metadata, and reusable curation analyses. Creating a Project freezes that
+snapshot so later Dataset edits do not silently alter an existing run.
 
-Legacy direct Project creation remains available for compatibility:
+Fresh duplicate/identity analyses are frozen as `project.dataset_curation`
+evidence. Their manifests can be copied under the Project `review/` directory so
+preflight and reports can consume them, but no `steps.dedup` or `steps.identity`
+record is created.
+
+Legacy direct Project creation remains available:
 
 ```bash
 ./lora new \
@@ -110,120 +149,97 @@ Legacy direct Project creation remains available for compatibility:
   --yes
 ```
 
-For this path, image inspection is frozen when the Project raw snapshot is
-created; it is no longer replayed by `./lora run`.
+For this path, inspection is frozen immediately beside the immutable `raw/`
+snapshot and is not a Project stage.
 
-A project contains:
+A Project contains:
 
 ```text
 projects/<name>/
 ├── raw/                         # immutable frozen input
-├── validation/                  # optional holdout images; never trained
+├── validation/                  # optional holdout; never trained
+├── dataset-manifest.json        # frozen inspection evidence
 ├── prepared/
 │   ├── current.json
-│   └── generations/<hash>/      # immutable effective image/caption generation
-├── review/                      # compatibility/review artifacts
+│   └── generations/<hash>/      # immutable effective training generation
+├── review/                      # frozen Dataset/review evidence where available
 ├── cache/
 ├── runs/
 └── project.yaml
 ```
 
-## Caption materialization
+## Materialization
 
-Caption generation and normalization are inputs to materialization, not a
-separate Project lifecycle stage. Guided training supplies the selected caption
-policy to `prepare`, which writes the effective captions into the immutable
-prepared generation.
+Caption generation and normalization are input transforms of materialization,
+not separate Project lifecycle stages. Materialization combines the frozen
+Dataset snapshot with TrainingConfig-specific trigger/anchors/policy and writes a
+content-addressed prepared generation.
 
-Supported policies remain:
+Supported caption policies:
 
-- `generate`: tag with the configured anime tagger and apply concept policy.
+- `generate`: run the configured anime tagger and apply concept policy.
 - `existing_passthrough`: preserve existing `.txt` bytes.
-- `existing_taglist_clean`: treat existing captions as Booru tag lists and
-  normalize them.
-- `hybrid`: keep existing content and add tagger suggestions; conflicts are
-  recorded as review artifacts.
+- `existing_taglist_clean`: normalize existing Booru-style tag lists.
+- `hybrid`: preserve existing content and add useful tagger suggestions.
 - `skip`: use raw sidecars without running a caption transform.
 
-The explicit legacy utility remains available for diagnostics or migration:
-
-```bash
-./lora caption PROJECT --mode existing_taglist_clean
-```
-
-It is not a prerequisite state for `prepare`. `prepare` fingerprints the raw
-images/captions and effective caption policy directly, so changing only the
-legacy caption-step record does not invalidate an otherwise identical prepared
-training set.
-
 Raw tagger outputs are cached by image content plus backend/model configuration,
-so adding or changing one image does not retag the entire dataset.
+so changing one image does not force a complete retag.
 
 Missing captions block materialization by default. Trigger-only fallback must be
 explicit:
 
 ```bash
-./lora prepare PROJECT --allow-trigger-only
+./lora materialize PROJECT --allow-trigger-only
 ```
 
-This is recorded as a high-risk strategy in manifests and preflight output.
+The fallback is recorded in the prepared manifest and surfaced by preflight.
+
+For old automation only, `prepare` is accepted as a deprecated alias of
+`materialize`; new scripts should not use it.
 
 ## Training lifecycle
 
-The normal Project training state machine is intentionally small:
-
-```text
-prepare -> preflight -> train
-```
-
-`prepare` is the current compatibility name for the materialization stage. It
-combines the frozen Dataset snapshot with the TrainingConfig-specific trigger,
-anchors and caption policy, then writes a content-addressed prepared generation.
-
-Run all remaining training stages with:
+Run all remaining Project stages with:
 
 ```bash
 ./lora run PROJECT --caption-mode existing_taglist_clean
 ```
 
-Or invoke the stages explicitly:
+Or invoke canonical stages explicitly:
 
 ```bash
-./lora prepare PROJECT
+./lora materialize PROJECT
 ./lora preflight PROJECT
 ./lora train PROJECT
 ```
 
-`inspect`, `dedup`, `identity`, `caption`, and `review` records may still exist
-inside old Projects for migration compatibility, but normal run orchestration and
-Project navigation do not replay them.
-
-Project state is written atomically. Interrupting a long training command records
-`interrupted`; when `sd-scripts` saved state exists, resume the same run:
+Project state is written atomically. Interrupting long training records the run
+as interrupted; when `sd-scripts` saved state exists, resume it with:
 
 ```bash
 ./lora train PROJECT --resume RUN_ID
 ```
 
-`--force-step` reruns a stage. `--break-lock` is deliberately separate and only
-breaks a lock proven stale on the current host. A live process lock cannot be
-overridden.
+`--force-step` reruns a Project stage. `--break-lock` is deliberately separate
+and only breaks a lock proven stale on the current host. A live process lock
+cannot be overridden.
 
 ## Preflight
 
-Preflight checks:
+Preflight checks the frozen effective training inputs, including:
 
 - base path, SHA256 identity, and stat cache;
-- immutable prepared generation and selected image count;
-- validation split isolation;
+- immutable materialized generation and selected image count;
+- Dataset inspection and frozen curation evidence where available;
+- validation split isolation from training;
 - missing/corrupt images and caption availability;
-- CLIP-L and CLIP-G token counts using the SDXL tokenizers;
-- configured bucket area versus the V100 envelope;
+- CLIP-L and CLIP-G token counts using SDXL tokenizers;
+- configured bucket area versus the hardware envelope;
 - resolved `images_seen`, optimizer steps, effective batch, and equivalent
   epochs;
 - persistent and optional scratch storage writability/free space;
-- inherited Dataset curation warnings and target-specific guardrails where
-  available.
+- target-specific guardrails.
 
 If tokenizer assets are not locally cached, preflight reports a clearly marked
 heuristic fallback. Cache both SDXL tokenizers and rerun preflight before relying
@@ -245,12 +261,12 @@ optimizer_steps = ceil(target_images_seen / effective_batch)
 actual_images_seen = optimizer_steps × effective_batch
 ```
 
-Every run records physical/effective batch, optimizer steps, target and actual
-images seen, equivalent epochs, dataset/caption hashes, base SHA256,
+Every Run records physical/effective batch, optimizer steps, target and actual
+images seen, equivalent epochs, Dataset/caption hashes, base SHA256,
 `sd-scripts` commit, generated TOML, CLI command, elapsed time, throughput,
 peak VRAM, average GPU utilization, and storage paths.
 
-Dataloader workers and an optional local scratch path are profile settings:
+Dataloader workers and optional local scratch storage are profile settings:
 
 ```yaml
 data_loader:
@@ -262,26 +278,25 @@ storage:
   scratch_root: null
 ```
 
-Set `scratch_root` only after validating a local SSD/NVMe path on the NAS. Logs
-and checkpoints are synchronized back to persistent project storage.
+Set `scratch_root` only after validating a local SSD/NVMe path. Logs and
+checkpoints are synchronized back to persistent Project storage.
 
 ## Results: evaluation and promotion
 
-Evaluation is intentionally outside the training state machine. A completed run
-can be evaluated repeatedly without reopening or invalidating training.
+Results are Run-scoped and deliberately outside Project state.
 
-### 1. Screening
+### Screening
 
-All candidate checkpoints are evaluated with a small canonical prompt matrix and
-strengths `0.6`, `0.8`, and `1.0`, including trigger-on and trigger-off pairs:
+Evaluate candidate checkpoints with the small canonical matrix, including
+trigger-on/off pairs:
 
 ```bash
 ./lora evaluate PROJECT --stage screening --run RUN_ID
 ```
 
-### 2. Full finalist evaluation
+### Full finalist evaluation
 
-Select one or two checkpoint finalists after reviewing screening sheets:
+After screening, choose one or two finalists:
 
 ```bash
 ./lora evaluate PROJECT \
@@ -292,7 +307,7 @@ Select one or two checkpoint finalists after reviewing screening sheets:
 ```
 
 A full evaluation with more than two candidates is rejected unless finalists
-are explicit. Each stage produces:
+are explicit. Results are stored beneath the Run, including:
 
 ```text
 samples/<stage>/generation-manifest.json
@@ -303,10 +318,10 @@ metrics/evaluation-<stage>.json
 report-<stage>.html
 ```
 
-Character evaluation uses holdout images under `validation/` for CCIP identity
-when available; otherwise the report clearly marks training-image fallback.
-Style evaluation uses a cross-content matrix and independent warnings for
-subject, portrait, background, multi-subject, and aspect-ratio bias.
+Character evaluation uses holdout images under `validation/` for identity
+comparison when available; otherwise reports clearly mark training-image
+fallback. Style evaluation uses cross-content tests and independent Dataset-bias
+warnings.
 
 Evaluation does **not** create `best.safetensors`. After manual review:
 
@@ -324,8 +339,8 @@ best.safetensors
 best.yaml
 ```
 
-`best.yaml` records the manual selection, checkpoint SHA256, recommended
-strength, base identity, training exposure, and evaluation evidence.
+`best.yaml` records the human selection, checkpoint SHA256, recommended strength,
+base identity, training exposure, and evaluation evidence.
 
 ## Shared-GPU hook
 
@@ -341,7 +356,7 @@ environment record:
 }
 ```
 
-Both commands are required and are executed as argument arrays, never through a
+Both commands are required and executed as argument arrays, never through a
 shell.
 
 ## Validation
@@ -353,7 +368,7 @@ python -m compileall -q pipeline tests
 python -m pytest -q
 ```
 
-GPU tests remain explicit because they require the configured V100 NAS:
+GPU tests remain explicit because they require the configured V100 environment:
 
 ```bash
 cp environment/smoke/train.example.toml environment/smoke/train.toml
@@ -361,5 +376,5 @@ cp environment/smoke/dataset-batch1.example.toml environment/smoke/dataset-batch
 ./environment/smoke/run_sd_scripts_smoke.sh 1
 ```
 
-The smoke test validates the deployed environment; it is not a per-dataset
+The smoke test validates the deployed environment; it is not a per-Dataset
 calibration stage.

@@ -8,12 +8,12 @@ import yaml
 from PIL import Image, ImageDraw
 
 from pipeline.config import repository_root, sha256_file, write_json_atomic
+from pipeline.evaluation import promotion
 from pipeline.evaluation.generation import GenerationBackend
 from pipeline.models import GeneratedImage, GenerationCase, TrainingRequest, TrainingResult
 from pipeline.service import create_project, load_project, run_remaining, run_single_step
 from pipeline.state import ProjectState, project_lock
 from pipeline.steps import preflight as preflight_step
-from pipeline.steps import promote
 from pipeline.trainer.base import TrainerBackend
 
 
@@ -139,19 +139,18 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
     }
     results = run_remaining(
         state,
-        skip={"dedup", "caption", "review"},
+        caption_mode="skip",
         trainer_backend=FakeTrainer(),
-        generation_backend=FakeGenerator(),
     )
     assert [name for name, _ in results] == [
-        "prepare",
+        "materialize",
         "preflight",
         "train",
     ]
     assert results[0][1].details["caption_mode"] == "skip"
     completed = load_project("style-test")
     assert completed.next_actionable_step() is None
-    for step_name in ("inspect", "prepare", "preflight", "train"):
+    for step_name in ("materialize", "preflight", "train"):
         assert completed.step(step_name).get("input_hash"), step_name
 
     run_id = str(completed.payload["runs"][-1]["id"])
@@ -162,13 +161,15 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
         evaluation_run=run_id,
     )
     completed = load_project("style-test")
-    assert completed.step("evaluate").get("input_hash")
+    run_record = completed.payload["runs"][-1]
+    assert "screening" in run_record["evaluation"]
+    assert "evaluate" not in completed.payload["steps"]
 
     raw_after = {
         path.name: sha256_file(path) for path in (state.project_dir / "raw").glob("*.png")
     }
     assert raw_after == raw_before
-    run_dir = Path(completed.payload["runs"][-1]["path"])
+    run_dir = Path(run_record["path"])
     assert not (run_dir / "best.safetensors").exists()
     assert not (run_dir / "best.yaml").exists()
     assert (run_dir / "contact-sheet.jpg").is_file()
@@ -176,9 +177,9 @@ def test_complete_style_pipeline_with_fake_backends(tmp_path, monkeypatch) -> No
     assert (run_dir / "contact-sheets" / "screening" / "trigger-leakage.jpg").is_file()
     assert (run_dir / "logs" / "pipeline.log").is_file()
 
-    checkpoint = Path(completed.payload["runs"][-1]["checkpoints"][0])
+    checkpoint = Path(run_record["checkpoints"][0])
     with project_lock(completed.project_dir):
-        promoted = promote.run(
+        promoted = promotion.run(
             ProjectState.load(completed.project_dir),
             run_id=run_dir.name,
             checkpoint_name=checkpoint.name,

@@ -12,7 +12,7 @@ from pipeline.dataset_workspace import (
     create_project_from_dataset,
     parse_number_selection,
 )
-from pipeline.models import PipelineError, StepStatus
+from pipeline.models import PipelineError
 
 
 class FakeTagger(TaggerBackend):
@@ -190,8 +190,6 @@ def test_project_is_an_immutable_snapshot_of_mutable_dataset(tmp_path) -> None:
     assert snapshot["image_count"] == 1
     assert snapshot["caption_count"] == 1
     assert state.payload["project"]["interactive_preferences"]["caption_mode"] == "existing_taglist_clean"
-    assert state.status("inspect") is StepStatus.SKIPPED
-    assert state.step("inspect")["permanent"] is True
     inspection_path = state.project_dir / "dataset-manifest.json"
     assert inspection_path.is_file()
     inspection = yaml.safe_load(inspection_path.read_text(encoding="utf-8"))
@@ -254,7 +252,7 @@ def test_dataset_curation_freshness_tracks_only_active_image_set(tmp_path) -> No
     assert stale["analyses"]["dedup"]["fresh"] is False
 
 
-def test_dataset_project_reuses_fresh_duplicate_analysis(tmp_path) -> None:
+def test_dataset_project_freezes_fresh_duplicate_analysis_as_snapshot_evidence(tmp_path) -> None:
     _base_registry(tmp_path)
     source = tmp_path / "source"
     _image(source / "a.png", "red")
@@ -273,13 +271,13 @@ def test_dataset_project_reuses_fresh_duplicate_analysis(tmp_path) -> None:
         root=tmp_path,
     )
 
-    assert state.status("dedup") is StepStatus.SKIPPED
-    assert state.step("dedup")["permanent"] is True
-    assert state.step("dedup")["details"]["dataset_curation_reused"] is True
+    record = state.payload["project"]["dataset_curation"]["analyses"]["dedup"]
+    assert record["fresh"] is True
+    assert record["summary"]
     assert (state.project_dir / "review" / "duplicates" / "manifest.json").is_file()
 
 
-def test_dataset_project_does_not_reuse_stale_duplicate_analysis(tmp_path) -> None:
+def test_dataset_project_marks_stale_duplicate_analysis_as_non_reusable_evidence(tmp_path) -> None:
     _base_registry(tmp_path)
     source = tmp_path / "source"
     _image(source / "a.png", "red")
@@ -299,11 +297,11 @@ def test_dataset_project_does_not_reuse_stale_duplicate_analysis(tmp_path) -> No
         root=tmp_path,
     )
 
-    assert state.status("dedup") is StepStatus.PENDING
     assert state.payload["project"]["dataset_curation"]["analyses"]["dedup"]["fresh"] is False
+    assert not (state.project_dir / "review" / "duplicates" / "manifest.json").exists()
 
 
-def test_dataset_project_reuses_fresh_character_identity_analysis(
+def test_dataset_project_freezes_fresh_character_identity_analysis(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -343,7 +341,7 @@ def test_dataset_project_reuses_fresh_character_identity_analysis(
         root=tmp_path,
     )
 
-    assert state.status("identity") is StepStatus.SKIPPED
-    assert state.step("identity")["permanent"] is True
-    assert state.step("identity")["details"]["dataset_curation_reused"] is True
+    record = state.payload["project"]["dataset_curation"]["analyses"]["identity"]
+    assert record["fresh"] is True
+    assert record["summary"]["possible_outliers"] == 0
     assert (state.project_dir / "review" / "outliers" / "manifest.json").is_file()

@@ -8,10 +8,11 @@ import yaml
 from PIL import Image
 
 from pipeline.config import repository_root, sha256_file
+from pipeline.evaluation import service as evaluate
 from pipeline.evaluation.generation import GenerationBackend
+from pipeline.materialization import run as materialize
 from pipeline.models import GeneratedImage, GenerationCase, PipelineError
 from pipeline.state import ProjectState
-from pipeline.steps import evaluate, prepare
 
 
 class FailIfCalledGenerator(GenerationBackend):
@@ -66,7 +67,7 @@ def _state_with_checkpoints(tmp_path, monkeypatch, count: int = 3) -> ProjectSta
     image = state.project_dir / "raw" / "sample.png"
     Image.new("RGB", (64, 64), "red").save(image)
     image.with_suffix(".txt").write_text("zz_eval, portrait\n", encoding="utf-8")
-    prepare.run(state)
+    materialize(state)
     run_dir = state.project_dir / "runs" / "run-1"
     checkpoints: list[str] = []
     for index in range(count):

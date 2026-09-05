@@ -10,11 +10,13 @@ from PIL import Image
 from pipeline.dataset.caption_cleaner import clean_caption, parse_caption
 from pipeline.dataset_workspace import DatasetWorkspace
 from pipeline.evaluation.outfit import outfit_retention_proxy, outfit_trigger_leakage_proxy
+from pipeline.evaluation.service import _build_cases
 from pipeline.interactive_outfit import InteractiveWizard
+from pipeline.materialization import run as materialize
+from pipeline.materialization import caption
 from pipeline.models import GeneratedImage, GenerationCase, PipelineError
 from pipeline.prepared import load_current_generation
-from pipeline.steps import caption, inspect, preflight, prepare
-from pipeline.steps.evaluate import _build_cases
+from pipeline.steps import preflight
 from pipeline.training_config import TrainingConfig, create_project_from_training_config
 
 
@@ -158,7 +160,7 @@ def test_caption_cleaner_pins_trigger_and_anchor_ahead_of_variable_tags() -> Non
     assert result.pruned
 
 
-def test_caption_step_injects_outfit_fixed_prefix(tmp_path, monkeypatch) -> None:
+def test_caption_transform_injects_outfit_fixed_prefix(tmp_path, monkeypatch) -> None:
     root = _repo_root(tmp_path, monkeypatch)
     workspace = _workspace(root, caption_text="portrait, smile, swimsuit")
     config = _outfit_config(root)
@@ -182,7 +184,7 @@ def test_trigger_only_fallback_keeps_character_anchor(tmp_path, monkeypatch) -> 
         workspace, config, project_name="run-fallback", root=root
     )
 
-    prepare.run(state, allow_trigger_only=True)
+    materialize(state, allow_trigger_only=True)
     generation = load_current_generation(state.project_dir)
     record = generation.manifest["images"][0]
     text = (generation.root / record["caption"]).read_text(encoding="utf-8").strip()
@@ -200,8 +202,7 @@ def test_preflight_blocks_passthrough_that_omits_outfit_context(tmp_path, monkey
         workspace, config, project_name="run-passthrough", root=root
     )
 
-    inspect.run(state)
-    prepare.run(state)
+    materialize(state, caption_mode="existing_passthrough")
     with pytest.raises(PipelineError) as error:
         preflight.run(state, minimum_free_gib=0)
     message = str(error.value)

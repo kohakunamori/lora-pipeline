@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import http.client
-import threading
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -18,7 +16,6 @@ from pipeline.dataset_workspace import DatasetWorkspace
 from pipeline.state import ProjectState
 from pipeline.video_character import VideoSubject, VideoSubjectReport
 from pipeline.video_composition import build_enriched_character_dataset
-from pipeline.web_full import make_server
 
 
 def _image(path: Path, *, size: tuple[int, int] = (768, 1024), color: str = "white") -> None:
@@ -214,61 +211,3 @@ def test_metadata_snapshot_is_frozen_with_training_state(tmp_path: Path) -> None
     reloaded = ProjectState.load(state.project_dir)
     assert reloaded.payload["project"]["dataset_metadata_snapshot"]["snapshot_hash"] == frozen_hash
     assert reloaded.payload["project"]["dataset_metadata_snapshot"]["images"][0]["composition_type"] == "upper_body"
-
-
-def _request(server, path: str) -> tuple[int, bytes]:
-    host, port = server.server_address[:2]
-    connection = http.client.HTTPConnection(host, port, timeout=5)
-    connection.request("GET", path)
-    response = connection.getresponse()
-    data = response.read()
-    status = response.status
-    connection.close()
-    return status, data
-
-
-def test_web_source_can_filter_by_composition_and_shows_metadata_badges(tmp_path: Path) -> None:
-    incoming = tmp_path / "incoming"
-    _image(incoming / "upper.png", color="red")
-    _image(incoming / "full.png", color="blue")
-    workspace = DatasetWorkspace.create("demo", root=tmp_path)
-    source = workspace.add_source_from_directory(incoming, kind="image_directory")
-    items = {item.relative.name: item for item in workspace.items()}
-    set_item_metadata(
-        workspace,
-        items["upper.png"],
-        {
-            "composition_type": "upper_body",
-            "variant_kind": "smart_crop",
-            "source_group_id": "frame-1:subject-1",
-            "analysis": {
-                "status": "analyzed",
-                "subject_area_ratio": 0.64,
-                "head_to_person_ratio": 0.31,
-            },
-        },
-    )
-    set_item_metadata(
-        workspace,
-        items["full.png"],
-        {"composition_type": "full_body", "variant_kind": "original_full"},
-    )
-
-    server = make_server("127.0.0.1", 0, root=tmp_path)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        status, data = _request(
-            server,
-            f"/datasets/demo/source/{source['id']}?composition=upper_body",
-        )
-        assert status == 200
-        assert "upper.png".encode() in data
-        assert "full.png".encode() not in data
-        assert "Upper body".encode() in data
-        assert "智能裁切".encode("utf-8") in data
-        assert "人物占比 64%".encode("utf-8") in data
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)

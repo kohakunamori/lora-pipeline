@@ -15,6 +15,7 @@ from .bases import add_base, inspect_base, scan_bases
 from .config import load_base_registry, repository_root
 from .dataset.image_info import discover_images
 from .doctor import run_doctor
+from .evaluation import promotion as promote
 from .models import STEP_NAMES, PipelineError, StateError, StepResult, StepStatus
 from .prepared import load_current_generation
 from .service import (
@@ -26,7 +27,6 @@ from .service import (
     skip_preflight_step,
 )
 from .state import ProjectState, project_lock
-from .steps import promote
 
 
 T = TypeVar("T")
@@ -40,7 +40,7 @@ class MenuItem:
 
 
 CAPTION_MODES: tuple[MenuItem, ...] = (
-    MenuItem("generate", "Generate captions", "Run the configured tagger and clean the result."),
+    MenuItem("generate", "Generate captions", "Run the configured tagger and clean the result during materialization."),
     MenuItem(
         "existing_passthrough",
         "Use existing captions unchanged",
@@ -49,14 +49,14 @@ CAPTION_MODES: tuple[MenuItem, ...] = (
     MenuItem(
         "existing_taglist_clean",
         "Clean existing tag lists",
-        "Treat source captions as Booru-style tags and normalize them.",
+        "Treat source captions as Booru-style tags and normalize them during materialization.",
     ),
     MenuItem(
         "hybrid",
         "Hybrid existing + generated",
-        "Keep source information and add useful tagger suggestions.",
+        "Keep source information and add useful tagger suggestions during materialization.",
     ),
-    MenuItem("skip", "Skip the caption step", "Preparation will require existing sidecars."),
+    MenuItem("skip", "Skip caption transformation", "Materialization will use existing sidecars or explicit trigger-only fallback."),
 )
 
 STRATEGIES: tuple[MenuItem, ...] = (
@@ -75,13 +75,8 @@ STATUS_STYLE = {
 }
 
 DEFAULT_PREFERENCES: dict[str, Any] = {
-    "run_dedup": True,
-    "exclude_exact_duplicates": False,
-    "run_identity": True,
     "caption_mode": "generate",
     "allow_trigger_only": False,
-    "run_review": True,
-    "run_screening_evaluation": True,
 }
 
 
@@ -92,12 +87,7 @@ class Wizard:
         self.console = console or Console()
         self.verbose = verbose
 
-    # ------------------------------------------------------------------
-    # Public entry points
-    # ------------------------------------------------------------------
     def home(self) -> None:
-        """Run the persistent interactive home screen."""
-
         while True:
             projects = self.list_projects()
             self._render_home(projects)
@@ -126,8 +116,6 @@ class Wizard:
             )
 
     def new_project(self) -> ProjectState | None:
-        """Create a project using a guided, validated form."""
-
         self.console.print(
             Panel.fit(
                 "[bold blue]Create a LoRA project[/bold blue]\n"
@@ -193,7 +181,7 @@ class Wizard:
                 f"Imported {image_count} images and {caption_count} source captions."
             )
         )
-        if self._confirm("Configure the guided workflow now?", default=True):
+        if self._confirm("Configure materialization preferences now?", default=True):
             self.configure_workflow(state.name)
         if self._confirm("Open the project dashboard?", default=True):
             self.project_dashboard(state.name)
@@ -206,8 +194,6 @@ class Wizard:
         self._render_project_steps(state)
 
     def project_dashboard(self, name: str, *, auto_continue: bool = False) -> None:
-        """Run a persistent project-specific dashboard."""
-
         first_iteration = True
         while True:
             state = load_project(name)
@@ -221,11 +207,11 @@ class Wizard:
                 f"Project: {name}",
                 [
                     MenuItem("continue", "Continue recommended work", self._recommended_action(state)),
-                    MenuItem("step", "Run one step", "Choose and run, retry, or force a specific pipeline step."),
-                    MenuItem("workflow", "Workflow preferences", "Save caption, review, and screening defaults."),
-                    MenuItem("evaluate", "Evaluate checkpoints", "Run screening or full evaluation without flags."),
+                    MenuItem("step", "Run one Project stage", "Choose materialize, preflight, or train."),
+                    MenuItem("workflow", "Materialization preferences", "Save caption transformation and fallback defaults."),
+                    MenuItem("evaluate", "Evaluate checkpoints", "Run run-scoped screening or full evaluation."),
                     MenuItem("promote", "Promote a checkpoint", "Create best.safetensors after human review."),
-                    MenuItem("artifacts", "Status and artifacts", "Inspect project paths, runs, reports, and outputs."),
+                    MenuItem("artifacts", "Status and artifacts", "Inspect Project state, runs, reports, and outputs."),
                     MenuItem("advanced", "Advanced recovery", "Preview work or record an expert preflight bypass."),
                     MenuItem("back", "Back to home", "Return to the project list."),
                 ],
@@ -244,19 +230,15 @@ class Wizard:
             }
             self._guarded(handlers[action])
 
-    # ------------------------------------------------------------------
-    # Project workflow
-    # ------------------------------------------------------------------
     def continue_project(self, name: str) -> None:
         state = load_project(name)
         next_step = state.next_actionable_step()
         if next_step is None:
-            self.console.print("[green]The core pipeline has no pending steps.[/green]")
+            self.console.print("[green]The Project lifecycle has no pending stages.[/green]")
             self._post_pipeline_menu(name)
             return
 
         preferences = self._preferences(state)
-        skip = self._skip_set(state, preferences)
         resume_run = None
         if next_step == "train":
             interrupted = self._interrupted_runs(state)
@@ -266,7 +248,7 @@ class Wizard:
             ):
                 resume_run = str(interrupted[-1]["id"])
 
-        self._render_run_plan(state, preferences, skip, resume_run=resume_run)
+        self._render_run_plan(state, preferences, set(), resume_run=resume_run)
         if not self._confirm("Start the guided run now?", default=True):
             return
 
@@ -279,9 +261,7 @@ class Wizard:
 
         results = run_remaining(
             state,
-            skip=skip,
             caption_mode=str(preferences["caption_mode"]),
-            exclude_exact=bool(preferences["exclude_exact_duplicates"]),
             allow_trigger_only=bool(preferences["allow_trigger_only"]),
             resume_run=resume_run,
             verbose=self.verbose,
@@ -304,30 +284,10 @@ class Wizard:
         current = self._preferences(state)
         self.console.print(
             Panel.fit(
-                "[bold]Guided workflow preferences[/bold]\n"
-                "These choices are saved in project.yaml and reused the next time you press Continue."
+                "[bold]Materialization preferences[/bold]\n"
+                "These choices control caption transformation while freezing the immutable training generation."
             )
         )
-        current["run_dedup"] = self._confirm(
-            "Run duplicate detection?", default=bool(current["run_dedup"])
-        )
-        if current["run_dedup"]:
-            current["exclude_exact_duplicates"] = self._confirm(
-                "Automatically exclude redundant exact copies?",
-                default=bool(current["exclude_exact_duplicates"]),
-            )
-        else:
-            current["exclude_exact_duplicates"] = False
-
-        if state.concept_type == "character":
-            current["run_identity"] = self._confirm(
-                "Run character identity consistency checks?",
-                default=bool(current["run_identity"]),
-            )
-        else:
-            current["run_identity"] = False
-            self.console.print("[dim]Character identity checks are not applicable to Style projects.[/dim]")
-
         current["caption_mode"] = self._menu(
             "Caption mode",
             list(CAPTION_MODES),
@@ -337,17 +297,9 @@ class Wizard:
             "Allow trigger-only fallback when an image has no caption?",
             default=bool(current["allow_trigger_only"]),
         )
-        current["run_review"] = self._confirm(
-            "Create a review summary before preparation?",
-            default=bool(current["run_review"]),
-        )
-        current["run_screening_evaluation"] = self._confirm(
-            "Run screening evaluation after training?",
-            default=bool(current["run_screening_evaluation"]),
-        )
         state.payload["project"]["interactive_preferences"] = current
         state.save()
-        self.console.print("[green]Workflow preferences saved.[/green]")
+        self.console.print("[green]Materialization preferences saved.[/green]")
         return current
 
     def run_one_step(self, name: str) -> None:
@@ -356,11 +308,12 @@ class Wizard:
             MenuItem(step, step, f"Current status: {state.status(step).value}")
             for step in STEP_NAMES
         ] + [MenuItem("back", "Back")]
-        step = self._menu("Choose a pipeline step", items, default=state.next_actionable_step() or "evaluate")
+        step = self._menu(
+            "Choose a Project stage",
+            items,
+            default=state.next_actionable_step() or "train",
+        )
         if step == "back":
-            return
-        if step == "evaluate":
-            self.evaluate_project(name)
             return
         if step == "train":
             self.train_project(name)
@@ -372,23 +325,12 @@ class Wizard:
             f"{step} is already {status.value}. Force a rerun?", default=False
         )
         kwargs: dict[str, Any] = {}
-        if step == "dedup":
-            kwargs["exclude_exact"] = self._confirm(
-                "Exclude all but one image in each exact-duplicate group?", default=False
-            )
-        elif step == "caption":
-            kwargs["caption_mode"] = self._menu(
-                "Caption mode", list(CAPTION_MODES), default=str(self._preferences(state)["caption_mode"])
-            )
-        elif step == "review":
-            raw = self._ask_text(
-                "Optional raw-relative image paths to exclude (comma-separated; blank for none)",
-                default="",
-            )
-            kwargs["exclusions"] = [value.strip() for value in raw.split(",") if value.strip()]
-        elif step == "prepare":
+        if step == "materialize":
+            preferences = self._preferences(state)
+            kwargs["caption_mode"] = str(preferences["caption_mode"])
             kwargs["allow_trigger_only"] = self._confirm(
-                "Allow trigger-only captions for otherwise uncaptioned images?", default=False
+                "Allow trigger-only captions for otherwise uncaptioned images?",
+                default=bool(preferences["allow_trigger_only"]),
             )
 
         result = self._run_with_lock_retry(
@@ -439,9 +381,7 @@ class Wizard:
 
         budget = int(state.payload["project"].get("budget", {}).get("value", 1000))
         override: int | None = None
-        if self._confirm(f"Use the saved exposure budget of {budget} images?", default=True):
-            override = None
-        else:
+        if not self._confirm(f"Use the saved exposure budget of {budget} images?", default=True):
             override = self._ask_positive_int("Exposure budget for this run", default=budget)
 
         force = state.status("train") in {StepStatus.DONE, StepStatus.SKIPPED} and self._confirm(
@@ -509,12 +449,10 @@ class Wizard:
             default=True,
         ):
             return
-        force = self._confirm("Regenerate images even if this exact evaluation is reusable?", default=False)
         result = self._run_with_lock_retry(
             lambda break_lock: run_single_step(
                 load_project(name),
                 "evaluate",
-                force=force,
                 break_lock=break_lock,
                 evaluation_stage=stage,
                 evaluation_run=str(run["id"]),
@@ -599,12 +537,12 @@ class Wizard:
         try:
             generation = load_current_generation(state.project_dir)
             paths.add_row(
-                "Prepared generation",
+                "Materialized generation",
                 str(generation.root),
                 f"{len(generation.manifest.get('images', []))} image(s)",
             )
         except PipelineError:
-            paths.add_row("Prepared generation", str(state.project_dir / "prepared"), "not created")
+            paths.add_row("Materialized generation", str(state.project_dir / "prepared"), "not created")
         paths.add_row("Runs", str(state.project_dir / "runs"), f"{len(state.payload.get('runs', []))} run(s)")
         self.console.print(paths)
 
@@ -637,7 +575,7 @@ class Wizard:
             action = self._menu(
                 "Advanced recovery",
                 [
-                    MenuItem("preview", "Preview next action", "Compute fingerprints without changing step state."),
+                    MenuItem("preview", "Preview next action", "Compute fingerprints without changing Project state."),
                     MenuItem(
                         "bypass",
                         "Record preflight bypass",
@@ -654,10 +592,8 @@ class Wizard:
                 preferences = self._preferences(state)
                 results = run_remaining(
                     state,
-                    skip=self._skip_set(state, preferences),
                     dry_run=True,
                     caption_mode=str(preferences["caption_mode"]),
-                    exclude_exact=bool(preferences["exclude_exact_duplicates"]),
                     allow_trigger_only=bool(preferences["allow_trigger_only"]),
                     verbose=self.verbose,
                 )
@@ -680,9 +616,6 @@ class Wizard:
                 )
                 self._print_step_result("preflight", result)
 
-    # ------------------------------------------------------------------
-    # Base model manager and doctor
-    # ------------------------------------------------------------------
     def base_manager(self) -> None:
         while True:
             registry = load_base_registry()
@@ -728,9 +661,6 @@ class Wizard:
         self.console.print(table)
         return result
 
-    # ------------------------------------------------------------------
-    # Rendering and selection helpers
-    # ------------------------------------------------------------------
     def list_projects(self) -> list[ProjectState]:
         projects_dir = repository_root() / "projects"
         if not projects_dir.is_dir():
@@ -800,8 +730,8 @@ class Wizard:
         self._render_project_steps(state, compact=True)
 
     def _render_project_steps(self, state: ProjectState, *, compact: bool = False) -> None:
-        table = Table(title="Pipeline steps")
-        table.add_column("Step")
+        table = Table(title="Project lifecycle")
+        table.add_column("Stage")
         table.add_column("Status")
         if not compact:
             table.add_column("Attempts", justify="right")
@@ -830,19 +760,16 @@ class Wizard:
         *,
         resume_run: str | None,
     ) -> None:
-        table = Table(title="Guided run plan")
-        table.add_column("Step")
+        del skip
+        table = Table(title="Project run plan")
+        table.add_column("Stage")
         table.add_column("Current")
         table.add_column("Plan")
         for step in STEP_NAMES:
-            if state.step(step).get("permanent"):
-                plan = "N/A"
-            elif step in skip:
-                plan = "skip"
-            elif step == "train" and resume_run:
+            if step == "train" and resume_run:
                 plan = f"resume {resume_run}"
-            elif step == "caption":
-                plan = str(preferences["caption_mode"])
+            elif step == "materialize":
+                plan = f"caption mode: {preferences['caption_mode']}"
             else:
                 plan = "run or reuse"
             table.add_row(step, state.status(step).value, plan)
@@ -968,31 +895,21 @@ class Wizard:
                 f"[red]Select between {minimum} and {maximum} valid, distinct checkpoint numbers.[/red]"
             )
 
-    # ------------------------------------------------------------------
-    # Internal state helpers
-    # ------------------------------------------------------------------
     def _preferences(self, state: ProjectState) -> dict[str, Any]:
         preferences = dict(DEFAULT_PREFERENCES)
-        preferences.update(state.payload["project"].get("interactive_preferences", {}))
-        if state.concept_type == "style":
-            preferences["run_identity"] = False
+        stored = state.payload["project"].get("interactive_preferences", {})
+        if isinstance(stored, dict):
+            if "caption_mode" in stored:
+                preferences["caption_mode"] = stored["caption_mode"]
+            if "allow_trigger_only" in stored:
+                preferences["allow_trigger_only"] = bool(stored["allow_trigger_only"])
         if preferences["caption_mode"] not in {item.value for item in CAPTION_MODES}:
             preferences["caption_mode"] = "generate"
         return preferences
 
     def _skip_set(self, state: ProjectState, preferences: dict[str, Any]) -> set[str]:
-        skip = set()
-        if not preferences["run_dedup"]:
-            skip.add("dedup")
-        if state.concept_type == "character" and not preferences["run_identity"]:
-            skip.add("identity")
-        if preferences["caption_mode"] == "skip":
-            skip.add("caption")
-        if not preferences["run_review"]:
-            skip.add("review")
-        if not preferences["run_screening_evaluation"]:
-            skip.add("evaluate")
-        return skip
+        del state, preferences
+        return set()
 
     def _successful_runs(self, state: ProjectState) -> list[dict[str, Any]]:
         return [
@@ -1045,9 +962,6 @@ class Wizard:
         elif action == "artifacts":
             self.show_artifacts(name)
 
-    # ------------------------------------------------------------------
-    # Interactive forms
-    # ------------------------------------------------------------------
     def _ask_project_name(self) -> str:
         while True:
             value = self._ask_text("Project name").strip()
@@ -1168,9 +1082,6 @@ class Wizard:
         table.add_row("Tensor count", str(result["tensor_count"]))
         self.console.print(table)
 
-    # ------------------------------------------------------------------
-    # Prompt and error helpers
-    # ------------------------------------------------------------------
     def _menu(self, title: str, items: Sequence[MenuItem], *, default: str | None = None) -> str:
         if not items:
             raise ValueError("Menu requires at least one item")

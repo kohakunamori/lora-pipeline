@@ -24,9 +24,10 @@ def _project(tmp_path, monkeypatch) -> ProjectState:
         strategy="quality",
     )
     Image.new("RGB", (64, 64), "red").save(state.project_dir / "raw" / "train.png")
-    state.payload["steps"]["evaluate"].update(
-        {"status": "done", "input_hash": "old-evaluation"}
-    )
+    for step in ("materialize", "preflight", "train"):
+        state.payload["steps"][step].update(
+            {"status": "done", "input_hash": f"old-{step}"}
+        )
     state.save()
     return state
 
@@ -37,7 +38,7 @@ def _wizard() -> InteractiveWizard:
     )
 
 
-def test_interactive_validation_import_copies_holdouts_and_only_invalidates_evaluation(
+def test_interactive_validation_import_copies_holdouts_without_invalidating_training(
     tmp_path, monkeypatch
 ) -> None:
     state = _project(tmp_path, monkeypatch)
@@ -53,9 +54,9 @@ def test_interactive_validation_import_copies_holdouts_and_only_invalidates_eval
     reloaded = ProjectState.load(state.project_dir)
     assert (state.project_dir / "validation" / "validation.png").is_file()
     assert (state.project_dir / "raw" / "train.png").is_file()
-    assert reloaded.status("train") is StepStatus.PENDING
-    assert reloaded.status("evaluate") is StepStatus.PENDING
-    assert reloaded.step("evaluate")["invalidation_reason"] == "train: validation holdout changed"
+    for step in ("materialize", "preflight", "train"):
+        assert reloaded.status(step) is StepStatus.DONE
+    assert "evaluate" not in reloaded.payload["steps"]
     assert reloaded.payload["project"]["validation_imports"][-1]["imported_images"] == 1
 
 
@@ -81,10 +82,6 @@ def test_interactive_budget_change_invalidates_only_training_dependent_steps(
 ) -> None:
     state = _project(tmp_path, monkeypatch)
     state.payload["project"]["budget"] = {"unit": "images_seen", "value": 1000}
-    for step in ("prepare", "preflight", "train", "evaluate"):
-        state.payload["steps"][step].update(
-            {"status": "done", "input_hash": f"old-{step}"}
-        )
     state.save()
     wizard = _wizard()
     menu_answers = iter(["budget", "back"])
@@ -98,6 +95,6 @@ def test_interactive_budget_change_invalidates_only_training_dependent_steps(
         "unit": "images_seen",
         "value": 2400,
     }
-    assert reloaded.status("prepare") is StepStatus.DONE
-    for step in ("preflight", "train", "evaluate"):
+    assert reloaded.status("materialize") is StepStatus.DONE
+    for step in ("preflight", "train"):
         assert reloaded.status(step) is StepStatus.PENDING

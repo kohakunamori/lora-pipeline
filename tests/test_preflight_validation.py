@@ -7,10 +7,12 @@ import pytest
 import yaml
 from PIL import Image
 
-from pipeline.config import repository_root, sha256_file
+from pipeline.config import repository_root, sha256_file, write_json_atomic
+from pipeline.dataset.image_info import inspect_dataset
+from pipeline.materialization import run as materialize
 from pipeline.models import PipelineError
 from pipeline.state import ProjectState
-from pipeline.steps import inspect, preflight, prepare
+from pipeline.steps import preflight
 
 
 def _project(tmp_path: Path, monkeypatch) -> ProjectState:
@@ -52,8 +54,11 @@ def _project(tmp_path: Path, monkeypatch) -> ProjectState:
     image.with_suffix(".txt").write_text(
         "zz_preflight, portrait, red dress\n", encoding="utf-8"
     )
-    inspect.run(state)
-    prepare.run(state)
+    write_json_atomic(
+        state.project_dir / "dataset-manifest.json",
+        inspect_dataset(state.project_dir / "raw"),
+    )
+    materialize(state)
     return state
 
 

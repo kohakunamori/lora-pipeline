@@ -13,9 +13,12 @@ from .config import (
     stable_hash,
     write_yaml_atomic,
 )
+from .dataset_metadata_snapshot import attach_dataset_metadata_snapshot
 from .dataset_workspace import DatasetWorkspace, create_project_from_dataset
+from .lifecycle_guard import lifecycle_lock
 from .models import PipelineError, StateError
 from .state import ProjectState, utc_now
+from .target_policy import attach_target_aware_dataset_semantics_snapshot
 from .trigger_policy import TRIGGER_STRATEGIES, resolve_trigger_policy
 
 
@@ -56,16 +59,8 @@ _CHARACTER_OUTFIT_EVALUATION = {
 def default_workflow(concept_type: str) -> dict[str, Any]:
     del concept_type
     return {
-        # Legacy curation utilities remain callable for old workspaces, but the
-        # normal contract assumes input identity is already correct. Training only
-        # needs materialization/captioning, preflight and train.
-        "run_dedup": False,
-        "exclude_exact_duplicates": False,
-        "run_identity": False,
         "caption_mode": "auto",
         "allow_trigger_only": False,
-        "run_review": False,
-        "run_screening_evaluation": False,
     }
 
 
@@ -413,6 +408,27 @@ def create_project_from_training_config(
     project_name: str,
     root: Path | None = None,
 ) -> ProjectState:
+    """Atomically freeze Dataset + TrainingConfig + semantic metadata into a Project."""
+
+    resolved = (root or repository_root()).resolve()
+    with lifecycle_lock(resolved):
+        fresh_workspace = DatasetWorkspace.load(workspace.name, root=resolved)
+        fresh_config = TrainingConfig.load(config.name, root=resolved)
+        return _create_project_from_training_config_unlocked(
+            fresh_workspace,
+            fresh_config,
+            project_name=project_name,
+            root=resolved,
+        )
+
+
+def _create_project_from_training_config_unlocked(
+    workspace: DatasetWorkspace,
+    config: TrainingConfig,
+    *,
+    project_name: str,
+    root: Path,
+) -> ProjectState:
     config.validate(require_enabled_base=True, root=root)
     if workspace.concept_type != config.concept_type:
         raise PipelineError(
@@ -447,10 +463,6 @@ def create_project_from_training_config(
             if dataset_snapshot.get("caption_count") == dataset_snapshot.get("image_count")
             else "generate"
         )
-    workflow["run_screening_evaluation"] = False
-    workflow["run_identity"] = False
-    workflow["run_dedup"] = False
-    workflow["run_review"] = False
     project["interactive_preferences"] = workflow
     project["training_identity"] = {
         "dataset": workspace.name,
@@ -460,7 +472,8 @@ def create_project_from_training_config(
         "target_type": config.target_type,
     }
     state.save()
-    return state
+    state = attach_dataset_metadata_snapshot(state, workspace)
+    return attach_target_aware_dataset_semantics_snapshot(state, workspace)
 
 
 def make_training_workspace_name(dataset_name: str, config_name: str, *, timestamp: str) -> str:

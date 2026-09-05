@@ -24,7 +24,7 @@ from .dataset.caption_cleaner import normalize_tag, parse_caption
 from .dataset.duplicates import find_duplicates_from_paths
 from .dataset.image_info import discover_images, inspect_image
 from .dataset.tagger import CachedTagger, ImgutilsWdTagger, TaggerBackend
-from .models import PipelineError, StateError, StepStatus
+from .models import PipelineError, StateError
 from .state import ProjectState, utc_now
 
 
@@ -935,28 +935,18 @@ def create_project_from_dataset(
     frozen_inspection["root"] = str(state.project_dir / "raw")
     inspection_path = state.project_dir / "dataset-manifest.json"
     write_json_atomic(inspection_path, frozen_inspection)
-    state.payload["steps"]["inspect"] = {
-        "status": StepStatus.SKIPPED.value,
-        "attempts": 0,
-        "reason": "reused DatasetWorkspace inspection from frozen dataset snapshot",
-        "permanent": True,
-        "finished_at": utc_now(),
-        "input_hash": str(frozen_inspection["input_hash"]),
-        "output_manifest": str(inspection_path),
-        "details": dict(frozen_inspection["summary"]),
-    }
 
     curation = workspace.curation_status(
         image_set_hash=str(snapshot["image_set_hash"]),
     )
     project["dataset_curation"] = curation
-    reusable = {
-        "dedup": ("review/duplicates/manifest.json", "dedup"),
-        "identity": ("review/outliers/manifest.json", "identity"),
+    frozen_targets = {
+        "dedup": "review/duplicates/manifest.json",
+        "identity": "review/outliers/manifest.json",
     }
-    for analysis_name, (target_relative, step_name) in reusable.items():
-        record = dict(curation["analyses"].get(analysis_name, {}))
-        if not record.get("fresh"):
+    for analysis_name, target_relative in frozen_targets.items():
+        record = curation["analyses"].get(analysis_name)
+        if not isinstance(record, dict) or not record.get("fresh"):
             continue
         source_relative = str(record.get("manifest") or "")
         if not source_relative:
@@ -965,24 +955,9 @@ def create_project_from_dataset(
         target_manifest = state.project_dir / target_relative
         target_manifest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_manifest, target_manifest)
-        state.payload["steps"][step_name] = {
-            "status": StepStatus.SKIPPED.value,
-            "attempts": 0,
-            "reason": (
-                f"reused fresh DatasetWorkspace {analysis_name} analysis "
-                "from frozen dataset snapshot"
-            ),
-            "permanent": True,
-            "finished_at": utc_now(),
-            "input_hash": str(record["image_set_hash"]),
-            "output_manifest": str(target_manifest),
-            "details": {
-                **dict(record.get("summary", {})),
-                "dataset_curation_reused": True,
-                "analyzer_version": record.get("analyzer_version"),
-                "parameters": dict(record.get("parameters", {})),
-            },
-        }
+        record["frozen"] = True
+        record["frozen_manifest"] = target_relative
+        record["source_manifest"] = source_relative
 
     preferences = dict(project.get("interactive_preferences", {}))
     if snapshot["caption_count"] == snapshot["image_count"]:

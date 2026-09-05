@@ -11,10 +11,8 @@ from typing import Any, Iterator
 from .config import repository_root
 from .models import PipelineError
 from .state import ProjectState, _lock_is_live, _read_lock
-from .web_jobs import list_jobs
 
 
-ACTIVE_JOB_STATES = {"queued", "starting", "running", "cancelling", "awaiting_identity"}
 ACTIVE_RUN_STATES = {"configuring", "running"}
 _PROCESS_LOCK = threading.RLock()
 _LOCAL = threading.local()
@@ -57,11 +55,7 @@ def _lifecycle_lock_live(path: Path) -> bool | None:
 
 @contextmanager
 def lifecycle_lock(root: Path | None = None) -> Iterator[None]:
-    """Serialize destructive lifecycle operations and training-workspace creation.
-
-    The lock is re-entrant inside one process and also represented by a small file so
-    independent CLI/Web processes cannot interleave a deletion with snapshot creation.
-    """
+    """Serialize destructive lifecycle operations and training-workspace creation."""
 
     resolved = (root or repository_root()).resolve()
     path = _lock_path(resolved)
@@ -94,10 +88,7 @@ def lifecycle_lock(root: Path | None = None) -> Iterator[None]:
         if descriptor is None:
             raise PipelineError(f"Could not acquire lifecycle lock: {path}")
 
-        token = {
-            "pid": os.getpid(),
-            "host": socket.gethostname(),
-        }
+        token = {"pid": os.getpid(), "host": socket.gethostname()}
         try:
             os.write(descriptor, (json.dumps(token, sort_keys=True) + "\n").encode("utf-8"))
             os.fsync(descriptor)
@@ -156,22 +147,6 @@ def _project_runtime_markers(state: ProjectState) -> list[dict[str, str]]:
                 }
             )
 
-    pid_path = state.project_dir / "web-worker.pid"
-    if pid_path.is_file():
-        try:
-            pid = int(pid_path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            pid = 0
-        if _pid_alive(pid):
-            blockers.append(
-                {
-                    "type": "web_worker",
-                    "id": state.name,
-                    "status": "running",
-                    "reason": f"legacy web training worker PID {pid} is still alive",
-                }
-            )
-
     runs = list(state.payload.get("runs", []))
     if runs:
         latest = runs[-1]
@@ -192,8 +167,7 @@ def _project_pending_dependency(state: ProjectState) -> bool:
     project = state.payload.get("project", {})
     if not isinstance(project, dict) or project.get("workspace_role") != "training_run":
         return False
-    runs = list(state.payload.get("runs", []))
-    if runs:
+    if state.payload.get("runs"):
         return False
     return state.next_actionable_step() is not None
 
@@ -204,7 +178,7 @@ def deletion_blockers(
     *,
     root: Path | None = None,
 ) -> list[dict[str, str]]:
-    """Return active lifecycle references that make permanent deletion unsafe."""
+    """Return active CLI/core lifecycle references that make deletion unsafe."""
 
     resolved = (root or repository_root()).resolve()
     if resource_type not in {"dataset", "training_config", "project", "run"}:
@@ -227,52 +201,10 @@ def deletion_blockers(
             seen.add(key)
             blockers.append(blocker)
 
-    for job in list_jobs(root=resolved, limit=500):
-        status = str(job.get("status") or "")
-        if status not in ACTIVE_JOB_STATES:
-            continue
-        payload = job.get("payload") or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        job_id = str(job.get("id") or "unknown")
-        kind = str(job.get("kind") or "job")
-        project_name = str(payload.get("project") or "")
-        direct_dataset = str(payload.get("dataset") or "")
-
-        matches = False
-        if resource_type == "project":
-            matches = project_name == resource_id
-        elif resource_type == "run":
-            matches = (
-                project_name == run_project
-                and str(payload.get("run_id") or "") in {"", run_id}
-            )
-        elif resource_type == "dataset" and direct_dataset == resource_id:
-            matches = True
-        elif project_name and project_name in states_by_name:
-            dataset_name, config_name = _project_identity(states_by_name[project_name])
-            matches = (
-                resource_type == "dataset" and dataset_name == resource_id
-            ) or (
-                resource_type == "training_config" and config_name == resource_id
-            )
-
-        if matches:
-            add(
-                {
-                    "type": "web_job",
-                    "id": job_id,
-                    "status": status,
-                    "reason": f"active {kind} job references this {resource_type}",
-                }
-            )
-
     if resource_type == "run":
         state = states_by_name.get(run_project)
         if state is not None:
             for blocker in _project_runtime_markers(state):
-                # A live project lock/worker protects every Run. A stale run-status marker
-                # only protects the same selected run.
                 if blocker["type"] != "training_run" or blocker["id"] == run_id:
                     add(blocker)
         return blockers

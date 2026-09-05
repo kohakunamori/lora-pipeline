@@ -6,7 +6,6 @@ import pytest
 from PIL import Image
 
 from pipeline.config import write_yaml_atomic
-from pipeline.dataset_deletion import delete_dataset_workspace
 from pipeline.dataset_workspace import DatasetWorkspace
 from pipeline.models import PipelineError
 from pipeline.resource_deletion import (
@@ -17,7 +16,6 @@ from pipeline.resource_deletion import (
 )
 from pipeline.state import ProjectState
 from pipeline.training_config import TrainingConfig
-from pipeline.web_jobs import create_job, update_job
 
 
 def _registry(root: Path) -> None:
@@ -101,30 +99,6 @@ def test_historical_trained_project_does_not_block_config_deletion(tmp_path: Pat
 
     assert result["config"] == config.name
     assert not config.path.exists()
-    assert (tmp_path / "projects" / "run" / "project.yaml").is_file()
-
-
-def test_queued_job_blocks_dataset_deletion(tmp_path: Path) -> None:
-    workspace = DatasetWorkspace.create("ds", root=tmp_path)
-    _project(tmp_path, dataset=workspace.name, run_status="trained")
-    create_job("evaluate", {"project": "run"}, root=tmp_path)
-
-    with pytest.raises(PipelineError, match="active lifecycle references"):
-        delete_dataset_workspace(workspace)
-
-    assert workspace.dataset_dir.is_dir()
-
-
-def test_completed_job_and_historical_project_allow_dataset_deletion(tmp_path: Path) -> None:
-    workspace = DatasetWorkspace.create("ds", root=tmp_path)
-    _project(tmp_path, dataset=workspace.name, run_status="trained")
-    job = create_job("evaluate", {"project": "run"}, root=tmp_path)
-    update_job(str(job["id"]), root=tmp_path, status="completed")
-
-    result = delete_dataset_workspace(workspace)
-
-    assert result["dataset"] == "ds"
-    assert not workspace.dataset_dir.exists()
     assert (tmp_path / "projects" / "run" / "project.yaml").is_file()
 
 

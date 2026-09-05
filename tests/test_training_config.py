@@ -65,8 +65,10 @@ def test_training_config_is_reusable_and_has_content_snapshot(tmp_path, monkeypa
     assert first["name"] == "quality-char"
     assert first["images_seen"] == 1600
     assert first["overrides"]["training"]["network_dim"] == 32
-    assert first["workflow"]["caption_mode"] == "auto"
-    assert first["workflow"]["run_screening_evaluation"] is False
+    assert first["workflow"] == {
+        "caption_mode": "auto",
+        "allow_trigger_only": False,
+    }
 
     loaded = TrainingConfig.load("quality-char", root=tmp_path)
     assert loaded.snapshot()["snapshot_hash"] == first["snapshot_hash"]
@@ -104,8 +106,10 @@ def test_dataset_and_training_config_are_frozen_together(tmp_path, monkeypatch) 
     assert project["training_identity"]["dataset"] == "demo"
     assert project["training_identity"]["config"] == "quality-char"
     assert project["overrides"]["training"]["network_dim"] == 32
-    assert project["interactive_preferences"]["caption_mode"] == "existing_taglist_clean"
-    assert project["interactive_preferences"]["run_screening_evaluation"] is False
+    assert project["interactive_preferences"] == {
+        "caption_mode": "existing_taglist_clean",
+        "allow_trigger_only": False,
+    }
 
     item = workspace.items()[0]
     workspace.replace_caption(item.key, "full body")
