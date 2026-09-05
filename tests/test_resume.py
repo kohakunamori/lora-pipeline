@@ -8,9 +8,10 @@ import yaml
 from PIL import Image
 
 from pipeline.config import repository_root, sha256_file
+from pipeline.materialization import run as materialize
 from pipeline.models import TrainingRequest, TrainingResult
 from pipeline.state import ProjectState
-from pipeline.steps import prepare, train
+from pipeline.steps import train
 from pipeline.trainer.base import TrainerBackend
 
 
@@ -86,7 +87,7 @@ def test_interrupted_run_resumes_from_latest_sd_scripts_state(tmp_path, monkeypa
     image = state.project_dir / "raw" / "sample.png"
     Image.new("RGB", (64, 64), "red").save(image)
     image.with_suffix(".txt").write_text("zz_resume, portrait\n", encoding="utf-8")
-    prepare.run(state)
+    materialize(state)
 
     run_dir = state.project_dir / "runs" / "run-1"
     old_state = run_dir / "checkpoints" / "000100-state"
