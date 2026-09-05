@@ -5,11 +5,11 @@ import sys
 from . import interactive_metadata_hooks as _interactive_metadata_hooks  # noqa: F401
 from .i18n import initialize_interactive
 from .interactive_local_video_import import install_local_video_import_modes
+from .interactive_materialization import InteractiveWizard
 from .interactive_menu_descriptions import install_menu_descriptions
 from .interactive_menu_navigation import install_menu_navigation
 from .interactive_menu_plaintext import install_plain_menu_labels
 from .interactive_result_reports import install_result_report_menu
-from .interactive_semantic_concepts import InteractiveWizard
 from .tty_compat import configure_interactive_input
 
 
