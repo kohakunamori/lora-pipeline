@@ -12,6 +12,7 @@ from rich.table import Table
 from .bases import add_base, inspect_base, scan_bases
 from .config import load_base_registry, repository_root
 from .doctor import run_doctor
+from .evaluation.promotion import run as promote_run
 from .models import PipelineError, StepResult
 from .service import (
     create_project,
@@ -21,7 +22,6 @@ from .service import (
     skip_preflight_step,
 )
 from .state import ProjectState, project_lock
-from .steps import promote
 from .wizard import Wizard
 
 
@@ -121,136 +121,95 @@ def open_command(
     )
 
 
-def _simple_step_command(name: str) -> Callable[..., None]:
-    def command(
-        ctx: typer.Context,
-        project: str = typer.Argument(...),
-        force_step: bool = typer.Option(False, "--force-step", "--force"),
-        break_lock: bool = typer.Option(False, "--break-lock"),
-        dry_run: bool = typer.Option(False, "--dry-run"),
-        yes: bool = typer.Option(False, "--yes", "-y"),
-    ) -> None:
-        del yes
-        _invoke(
-            lambda: _print_step_result(
-                name,
-                run_single_step(
-                    load_project(project),
-                    name,
-                    force=force_step,
-                    break_lock=break_lock,
-                    dry_run=dry_run,
-                    verbose=int((ctx.obj or {}).get("verbose", 0)),
-                ),
-            )
-        )
-
-    command.__name__ = f"{name}_command"
-    return command
-
-
-for _step_name in ("inspect", "identity", "preflight"):
-    app.command(_step_name)(_simple_step_command(_step_name))
-
-
-@app.command("dedup")
-def dedup_command(
+def _run_materialize_command(
     ctx: typer.Context,
-    project: str = typer.Argument(...),
-    exclude_exact: bool = typer.Option(False, "--exclude-exact"),
-    force_step: bool = typer.Option(False, "--force-step", "--force"),
-    break_lock: bool = typer.Option(False, "--break-lock"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    project: str,
+    caption_mode: str,
+    allow_trigger_only: bool,
+    force_step: bool,
+    break_lock: bool,
+    dry_run: bool,
+    *,
+    label: str = "materialize",
 ) -> None:
     _invoke(
         lambda: _print_step_result(
-            "dedup",
+            label,
             run_single_step(
                 load_project(project),
-                "dedup",
+                "materialize",
                 force=force_step,
                 break_lock=break_lock,
                 dry_run=dry_run,
-                exclude_exact=exclude_exact,
+                caption_mode=caption_mode,
+                allow_trigger_only=allow_trigger_only,
                 verbose=int((ctx.obj or {}).get("verbose", 0)),
             ),
         )
     )
 
 
-@app.command("caption")
-def caption_command(
+@app.command("materialize")
+def materialize_command(
     ctx: typer.Context,
     project: str = typer.Argument(...),
-    mode: str = typer.Option(
-        "generate",
-        "--mode",
-        help="generate, existing_passthrough, existing_taglist_clean, hybrid, or skip",
-    ),
-    force_step: bool = typer.Option(False, "--force-step", "--force"),
-    break_lock: bool = typer.Option(False, "--break-lock"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
-) -> None:
-    _invoke(
-        lambda: _print_step_result(
-            "caption",
-            run_single_step(
-                load_project(project),
-                "caption",
-                force=force_step,
-                break_lock=break_lock,
-                dry_run=dry_run,
-                caption_mode=mode,
-                verbose=int((ctx.obj or {}).get("verbose", 0)),
-            ),
-        )
-    )
-
-
-@app.command("review")
-def review_command(
-    ctx: typer.Context,
-    project: str = typer.Argument(...),
-    exclude: list[str] | None = typer.Option(None, "--exclude"),
-    force_step: bool = typer.Option(False, "--force-step", "--force"),
-    break_lock: bool = typer.Option(False, "--break-lock"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
-) -> None:
-    _invoke(
-        lambda: _print_step_result(
-            "review",
-            run_single_step(
-                load_project(project),
-                "review",
-                force=force_step,
-                break_lock=break_lock,
-                dry_run=dry_run,
-                exclusions=exclude or [],
-                verbose=int((ctx.obj or {}).get("verbose", 0)),
-            ),
-        )
-    )
-
-
-@app.command("prepare")
-def prepare_command(
-    ctx: typer.Context,
-    project: str = typer.Argument(...),
+    caption_mode: str = typer.Option("generate", "--caption-mode"),
     allow_trigger_only: bool = typer.Option(False, "--allow-trigger-only"),
     force_step: bool = typer.Option(False, "--force-step", "--force"),
     break_lock: bool = typer.Option(False, "--break-lock"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
+    _run_materialize_command(
+        ctx,
+        project,
+        caption_mode,
+        allow_trigger_only,
+        force_step,
+        break_lock,
+        dry_run,
+    )
+
+
+@app.command("prepare", hidden=True)
+def prepare_compat_command(
+    ctx: typer.Context,
+    project: str = typer.Argument(...),
+    caption_mode: str = typer.Option("generate", "--caption-mode"),
+    allow_trigger_only: bool = typer.Option(False, "--allow-trigger-only"),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    console.print("[yellow]prepare is deprecated; use materialize[/yellow]")
+    _run_materialize_command(
+        ctx,
+        project,
+        caption_mode,
+        allow_trigger_only,
+        force_step,
+        break_lock,
+        dry_run,
+        label="materialize",
+    )
+
+
+@app.command("preflight")
+def preflight_command(
+    ctx: typer.Context,
+    project: str = typer.Argument(...),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
     _invoke(
         lambda: _print_step_result(
-            "prepare",
+            "preflight",
             run_single_step(
                 load_project(project),
-                "prepare",
+                "preflight",
                 force=force_step,
                 break_lock=break_lock,
                 dry_run=dry_run,
-                allow_trigger_only=allow_trigger_only,
                 verbose=int((ctx.obj or {}).get("verbose", 0)),
             ),
         )
@@ -273,11 +232,8 @@ def train_command(
         state = load_project(project)
         if skip_preflight:
             console.print("[bold yellow]WARNING:[/bold yellow] preflight bypass recorded")
-            _print_step_result(
-                "preflight", skip_preflight_step(state, break_lock=break_lock)
-            )
+            _print_step_result("preflight", skip_preflight_step(state, break_lock=break_lock))
             state = load_project(project)
-            lock_override = False
         else:
             preflight_result = run_single_step(
                 state,
@@ -288,12 +244,10 @@ def train_command(
             if not preflight_result.details.get("reused"):
                 _print_step_result("preflight", preflight_result)
             state = load_project(project)
-            lock_override = False
         result = run_single_step(
             state,
             "train",
             force=force_step,
-            break_lock=lock_override,
             dry_run=dry_run,
             images_seen=images_seen,
             optimizer_steps=legacy_steps,
@@ -305,6 +259,38 @@ def train_command(
     _invoke(action)
 
 
+@app.command("run")
+def run_command(
+    ctx: typer.Context,
+    project: str = typer.Argument(...),
+    force_step: bool = typer.Option(False, "--force-step", "--force"),
+    break_lock: bool = typer.Option(False, "--break-lock"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    caption_mode: str = typer.Option("generate", "--caption-mode"),
+    images_seen: int | None = typer.Option(None, "--images-seen", min=1),
+    allow_trigger_only: bool = typer.Option(False, "--allow-trigger-only"),
+    skip_preflight: bool = typer.Option(False, "--skip-preflight"),
+) -> None:
+    def action() -> None:
+        if skip_preflight:
+            console.print("[bold yellow]WARNING:[/bold yellow] preflight bypass recorded")
+        results = run_remaining(
+            load_project(project),
+            skip_preflight=skip_preflight,
+            force=force_step,
+            break_lock=break_lock,
+            dry_run=dry_run,
+            caption_mode=caption_mode,
+            images_seen=images_seen,
+            allow_trigger_only=allow_trigger_only,
+            verbose=int((ctx.obj or {}).get("verbose", 0)),
+        )
+        for step, result in results:
+            _print_step_result(step, result)
+
+    _invoke(action)
+
+
 @app.command("evaluate")
 def evaluate_command(
     ctx: typer.Context,
@@ -312,7 +298,6 @@ def evaluate_command(
     stage: str = typer.Option("screening", "--stage", help="screening or full"),
     run_id: str | None = typer.Option(None, "--run"),
     checkpoint: list[str] | None = typer.Option(None, "--checkpoint"),
-    force_step: bool = typer.Option(False, "--force-step", "--force"),
     break_lock: bool = typer.Option(False, "--break-lock"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
@@ -322,7 +307,6 @@ def evaluate_command(
             run_single_step(
                 load_project(project),
                 "evaluate",
-                force=force_step,
                 break_lock=break_lock,
                 dry_run=dry_run,
                 evaluation_stage=stage,
@@ -346,7 +330,7 @@ def promote_command(
     def action() -> None:
         state = load_project(project)
         with project_lock(state.project_dir, break_lock=break_lock):
-            payload = promote.run(
+            payload = promote_run(
                 ProjectState.load(state.project_dir),
                 run_id=run_id,
                 checkpoint_name=checkpoint,
@@ -354,57 +338,6 @@ def promote_command(
                 allow_unreviewed=allow_unreviewed,
             )
         console.print_json(data=payload)
-
-    _invoke(action)
-
-
-@app.command("run")
-def run_command(
-    ctx: typer.Context,
-    project: str = typer.Argument(...),
-    force_step: bool = typer.Option(False, "--force-step", "--force"),
-    break_lock: bool = typer.Option(False, "--break-lock"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
-    caption_mode: str = typer.Option("generate", "--caption-mode"),
-    images_seen: int | None = typer.Option(None, "--images-seen", min=1),
-    allow_trigger_only: bool = typer.Option(False, "--allow-trigger-only"),
-    exclude_exact: bool = typer.Option(False, "--exclude-exact"),
-    skip_dedup: bool = typer.Option(False, "--skip-dedup"),
-    skip_identity: bool = typer.Option(False, "--skip-identity"),
-    skip_caption: bool = typer.Option(False, "--skip-caption"),
-    skip_review: bool = typer.Option(False, "--skip-review"),
-    skip_preflight: bool = typer.Option(False, "--skip-preflight"),
-    skip_evaluate: bool = typer.Option(False, "--skip-evaluate"),
-) -> None:
-    def action() -> None:
-        skip = {
-            name
-            for name, enabled in {
-                "dedup": skip_dedup,
-                "identity": skip_identity,
-                "caption": skip_caption,
-                "review": skip_review,
-                "evaluate": skip_evaluate,
-            }.items()
-            if enabled
-        }
-        if skip_preflight:
-            console.print("[bold yellow]WARNING:[/bold yellow] preflight bypass recorded")
-        results = run_remaining(
-            load_project(project),
-            skip=skip,
-            skip_preflight=skip_preflight,
-            force=force_step,
-            break_lock=break_lock,
-            dry_run=dry_run,
-            caption_mode="skip" if skip_caption else caption_mode,
-            images_seen=images_seen,
-            allow_trigger_only=allow_trigger_only,
-            exclude_exact=exclude_exact,
-            verbose=int((ctx.obj or {}).get("verbose", 0)),
-        )
-        for step, result in results:
-            _print_step_result(step, result)
 
     _invoke(action)
 
