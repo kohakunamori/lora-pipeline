@@ -182,7 +182,6 @@ class TrainingConfig:
 
     @classmethod
     def load(cls, name: str, *, root: Path | None = None) -> "TrainingConfig":
-        path = training_config_path(name, root=root) / Path("")
         path = training_config_path(name, root=root)
         if not path.is_file():
             raise StateError(f"Training config does not exist: {name}")
@@ -249,13 +248,22 @@ class TrainingConfig:
         ).as_dict()
 
     def runtime_overrides(self) -> dict[str, Any]:
+        """Return runtime settings while protecting the complete TriggerPolicy prefix."""
+
         target_defaults: dict[str, Any] = {}
         if self.target_type == "character_outfit":
             target_defaults = {
                 "caption": {"anchor_tags": self.anchor_tags},
                 "evaluation": copy.deepcopy(_CHARACTER_OUTFIT_EVALUATION),
             }
-        return deep_merge(target_defaults, self.overrides)
+        merged = deep_merge(target_defaults, self.overrides)
+        caption = merged.setdefault("caption", {})
+        protected_count = len(self.trigger_policy.get("protected_prefix", []))
+        caption["keep_tokens"] = max(
+            int(caption.get("keep_tokens", 1) or 1),
+            max(1, protected_count),
+        )
+        return merged
 
     def effective_evaluation(self) -> dict[str, Any]:
         result = copy.deepcopy(self.evaluation)
