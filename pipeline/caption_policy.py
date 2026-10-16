@@ -5,11 +5,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
-from .config import resolve_profiles, stable_hash, write_json_atomic
+from .config import resolve_project_profiles, stable_hash, write_json_atomic
 from .dataset.caption_cleaner import normalize_tag, parse_caption
 from .dataset.tag_categories import is_identity_tag, is_outfit_tag
 from .models import PipelineError, StepResult, StepStatus
-from .tokenizers import count_sdxl_tokens
+from .tokenizers import count_project_tokens
 
 CHARACTER_CAPTION_POLICIES = ("strong_identity", "balanced", "controllable")
 STYLE_CAPTION_POLICY = "content_rich"
@@ -39,12 +39,7 @@ def default_caption_policy(target_type: str) -> str:
 def resolve_caption_policy(state) -> str:
     project = state.payload.get("project", {})
     target_type = str(project.get("training_target_type", project.get("type", "")))
-    profiles = resolve_profiles(
-        str(project.get("hardware", "v100_16gb")),
-        str(project.get("type", "character")),
-        str(project.get("strategy", "quality")),
-        project_overrides=project.get("overrides", {}),
-    )
+    profiles = resolve_project_profiles(project)
     requested = str(
         profiles.merged.get("caption", {}).get("policy")
         or default_caption_policy(target_type)
@@ -148,15 +143,9 @@ def apply_target_caption_policy(state, result: StepResult) -> StepResult:
         total_suppressed += len(removed)
         if record.get("caption"):
             Path(str(record["caption"])).write_text(text + "\n", encoding="utf-8")
-        counts = count_sdxl_tokens(text)
+        counts = count_project_tokens(text, project)
         record["text"] = text
-        record["token_counts"] = {
-            "clip_l": counts.clip_l,
-            "clip_g": counts.clip_g,
-            "exact": counts.exact,
-            "backend": counts.backend,
-            "error": counts.error,
-        }
+        record["token_counts"] = counts.as_dict()
         record["caption_policy"] = {
             "policy": policy,
             "suppressed": removed,

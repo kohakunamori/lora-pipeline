@@ -1010,7 +1010,23 @@ class Wizard:
         suggested_id = self._slug(path.stem)
         base_id = self._ask_text("Base id", default=suggested_id).strip()
         name = self._ask_text("Display name", default=path.stem).strip()
-        base = add_base(base_id, path, name=name, root=repository_root())
+        family = self._menu(
+            "Base model family",
+            [
+                MenuItem("illustrious_sdxl", "Illustrious / SDXL"),
+                MenuItem("anima", "Anima DiT", "Requires Qwen3 and Qwen-Image VAE component paths."),
+            ],
+            default="illustrious_sdxl",
+        )
+        components = {}
+        if family == "anima":
+            components = {
+                "qwen3": Path(self._ask_text("Qwen3 weights or directory path")).expanduser(),
+                "vae": Path(self._ask_text("Qwen-Image VAE weights path")).expanduser(),
+            }
+        base = add_base(
+            base_id, path, name=name, family=family, components=components, root=repository_root()
+        )
         self.console.print(f"[green]Registered {base.id}.[/green]")
         if self._confirm("Inspect metadata and establish the SHA256 identity now?", default=True):
             self._show_base_inspection(

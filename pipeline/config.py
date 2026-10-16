@@ -131,6 +131,14 @@ def load_base_registry(root: Path | None = None) -> dict[str, BaseModel]:
             prediction_type=str(item.get("prediction_type", "epsilon")),
             sha256=item.get("sha256"),
             enabled=bool(item.get("enabled", True)),
+            components={
+                str(name): (
+                    Path(str(value.get("path", "")))
+                    if isinstance(value, Mapping)
+                    else Path(str(value))
+                )
+                for name, value in (item.get("components", {}) or {}).items()
+            },
             generation_defaults=item.get("generation_defaults", {}),
         )
     return result
@@ -144,14 +152,73 @@ def resolve_profiles(
     project_overrides: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
     root: Path | None = None,
+    base_family: str | None = None,
 ) -> ResolvedConfig:
     root = root or repository_root()
     hardware = read_yaml(root / "profiles" / "hardware" / f"{hardware_id}.yaml")
     concept = read_yaml(root / "profiles" / "concepts" / f"{concept_id}.yaml")
     training = read_yaml(root / "profiles" / "training" / f"{training_id}.yaml")
-    merged = deep_merge(hardware, concept, training, project_overrides or {}, cli_overrides or {})
+    family_path = (
+        root / "profiles" / "base-families" / f"{base_family}.yaml"
+        if base_family
+        else None
+    )
+    base_family_config = read_yaml(family_path) if family_path and family_path.is_file() else {}
+    merged = deep_merge(
+        hardware,
+        concept,
+        training,
+        base_family_config,
+        project_overrides or {},
+        cli_overrides or {},
+    )
     validate_safety(hardware, training, merged)
+    if base_family == "anima":
+        validate_anima_safety(merged)
     return ResolvedConfig(hardware=hardware, concept=concept, training=training, merged=merged)
+
+
+def resolve_project_profiles(
+    project: Mapping[str, Any],
+    *,
+    cli_overrides: Mapping[str, Any] | None = None,
+    root: Path | None = None,
+) -> ResolvedConfig:
+    root = root or repository_root()
+    base_id = str(project.get("base", ""))
+    base = load_base_registry(root).get(base_id)
+    return resolve_profiles(
+        str(project.get("hardware", "v100_16gb")),
+        str(project.get("type", "character")),
+        str(project.get("strategy", "quality")),
+        project_overrides=project.get("overrides", {}),
+        cli_overrides=cli_overrides,
+        root=root,
+        base_family=base.family if base else None,
+    )
+
+
+def validate_anima_safety(merged: Mapping[str, Any]) -> None:
+    training = merged.get("training", {})
+    caption = merged.get("caption", {})
+    if bool(training.get("cache_text_encoder_outputs")) or bool(
+        training.get("cache_text_encoder_outputs_to_disk")
+    ):
+        incompatible = []
+        if bool(caption.get("shuffle")):
+            incompatible.append("caption.shuffle")
+        if int(caption.get("token_warmup_step", 0)):
+            incompatible.append("caption.token_warmup_step")
+        if float(caption.get("tag_dropout_rate", 0)):
+            incompatible.append("caption.tag_dropout_rate")
+        if incompatible:
+            raise ConfigurationError(
+                "Anima text-encoder caching is incompatible with: " + ", ".join(incompatible)
+            )
+        if not bool(training.get("network_train_unet_only", True)):
+            raise ConfigurationError(
+                "Anima text-encoder caching requires network_train_unet_only=true"
+            )
 
 
 def validate_safety(

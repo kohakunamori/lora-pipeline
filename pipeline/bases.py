@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .config import load_base_registry, read_yaml, repository_root, sha256_file, write_yaml_atomic
 from .models import BaseModel, ConfigurationError, PipelineError
@@ -16,12 +16,30 @@ def add_base(
     family: str = "illustrious_sdxl",
     prediction_type: str = "epsilon",
     enabled: bool = True,
+    components: Mapping[str, Path] | None = None,
     root: Path,
 ) -> BaseModel:
     _validate_base_id(base_id)
     path = path.expanduser().resolve()
     if not path.is_file():
         raise PipelineError(f"Checkpoint does not exist: {path}")
+    normalized_components = {
+        str(key): value.expanduser().resolve()
+        for key, value in (components or {}).items()
+    }
+    if family == "anima":
+        missing = {"qwen3", "vae"} - normalized_components.keys()
+        if missing:
+            raise ConfigurationError(
+                "Anima bases require --qwen3 and --vae component paths"
+            )
+        missing_files = [
+            str(value) for value in normalized_components.values() if not value.is_file()
+        ]
+        if missing_files:
+            raise PipelineError("Base component file does not exist: " + ", ".join(missing_files))
+        if prediction_type == "epsilon":
+            prediction_type = "rectified_flow"
     registry_path = root / "bases" / "registry.yaml"
     payload = read_yaml(registry_path) if registry_path.exists() else {"bases": {}}
     bases = payload.setdefault("bases", {})
@@ -35,10 +53,82 @@ def add_base(
         "sha256": None,
         "sha256_stat": None,
         "enabled": enabled,
-        "generation_defaults": {"sampler": "euler_a", "cfg": 4.5, "steps": 28},
+        "components": {
+            key: {"path": str(value), "sha256": None, "sha256_stat": None}
+            for key, value in normalized_components.items()
+        },
+        "generation_defaults": (
+            {
+                "cfg": 3.5,
+                "steps": 28,
+                "flow_shift": 5.0,
+                "width": 1024,
+                "height": 1024,
+            }
+            if family == "anima"
+            else {"sampler": "euler_a", "cfg": 4.5, "steps": 28}
+        ),
     }
     write_yaml_atomic(registry_path, payload)
     return load_base_registry(root)[base_id]
+
+
+def resolve_base_component_fingerprints(
+    base_id: str,
+    *,
+    root: Path | None = None,
+    full: bool = False,
+    persist: bool = True,
+) -> dict[str, dict[str, Any]]:
+    root = root or repository_root()
+    registry_path = root / "bases" / "registry.yaml"
+    payload = read_yaml(registry_path) if registry_path.exists() else {"bases": {}}
+    try:
+        base_item = payload["bases"][base_id]
+    except (KeyError, TypeError) as exc:
+        raise PipelineError(f"Unknown base id: {base_id}") from exc
+    raw_components = base_item.get("components", {}) or {}
+    if not isinstance(raw_components, dict):
+        raise ConfigurationError(f"Base {base_id!r} components must be a mapping")
+    if str(base_item.get("family", "")) == "anima":
+        missing = {"qwen3", "vae"} - raw_components.keys()
+        if missing:
+            raise PipelineError(
+                "Anima base is missing required components: " + ", ".join(sorted(missing))
+            )
+    result: dict[str, dict[str, Any]] = {}
+    changed = False
+    for name, raw_entry in raw_components.items():
+        entry = dict(raw_entry) if isinstance(raw_entry, dict) else {"path": str(raw_entry)}
+        path = Path(str(entry.get("path", ""))).expanduser()
+        if not path.is_file():
+            raise PipelineError(f"Base component {name!r} does not exist: {path}")
+        signature = checkpoint_stat_signature(path)
+        registered_sha = entry.get("sha256")
+        cached_stat = entry.get("sha256_stat")
+        cache_reused = not full and bool(registered_sha) and cached_stat == signature
+        digest = str(registered_sha) if cache_reused else sha256_file(path)
+        if registered_sha and digest != registered_sha:
+            raise PipelineError(
+                f"Base component SHA256 mismatch for {name}: "
+                f"expected {registered_sha}, got {digest}"
+            )
+        if persist and (not registered_sha or cached_stat != signature):
+            entry["path"] = str(path)
+            entry["sha256"] = digest
+            entry["sha256_stat"] = signature
+            raw_components[name] = entry
+            changed = True
+        result[str(name)] = {
+            "path": str(path),
+            "bytes": signature["bytes"],
+            "sha256": digest,
+            "sha256_cache_reused": cache_reused,
+            "sha256_stat": signature,
+        }
+    if changed:
+        write_yaml_atomic(registry_path, payload)
+    return result
 
 
 def checkpoint_stat_signature(path: Path) -> dict[str, int]:
@@ -125,6 +215,9 @@ def inspect_base(
         "bytes": base.path.stat().st_size,
         "family": base.family,
         "prediction_type": base.prediction_type,
+        "components": resolve_base_component_fingerprints(
+            base_id, root=root, full=full_hash, persist=persist_sha
+        ),
         "sha256": digest,
         "registered_sha256": base.sha256,
         "sha256_matches": base.sha256 in {None, digest},

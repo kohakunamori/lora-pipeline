@@ -1,0 +1,9 @@
+# Anima defaults for the pinned sd-scripts V100 FP16/SDPA backend.
+caption:
+  max_token_length: 512
+training:
+  network_module: networks.lora_anima
+  network_train_unet_only: true
+  timestep_sampling: sigmoid
+  discrete_flow_shift: 1.0
+  vae_chunk_size: 64

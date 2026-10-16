@@ -27,12 +27,12 @@ from .wizard import Wizard
 
 app = typer.Typer(
     name="lora",
-    help="Resumable Illustrious/SDXL LoRA pipeline around pinned sd-scripts.",
+    help="Resumable SDXL and Anima LoRA pipeline around pinned sd-scripts.",
     invoke_without_command=True,
     no_args_is_help=False,
     pretty_exceptions_show_locals=False,
 )
-base_app = typer.Typer(help="Inspect and register local Illustrious/SDXL checkpoints.")
+base_app = typer.Typer(help="Inspect and register local SDXL or Anima base models.")
 app.add_typer(base_app, name="base")
 console = Console()
 
@@ -371,13 +371,27 @@ def base_add_command(
     name: str | None = typer.Option(None, "--name"),
     family: str = typer.Option("illustrious_sdxl", "--family"),
     prediction_type: str = typer.Option("epsilon", "--prediction-type"),
+    qwen3: Path | None = typer.Option(None, "--qwen3", help="Anima Qwen3 text encoder weights or directory."),
+    vae: Path | None = typer.Option(None, "--vae", help="Anima Qwen-Image VAE weights."),
 ) -> None:
-    _invoke(
-        lambda: console.print(
-            f"[green]Registered[/green] "
-            f"{add_base(base_id, path, name=name, family=family, prediction_type=prediction_type, root=repository_root()).id}"
+    components = {}
+    if qwen3 is not None:
+        components["qwen3"] = qwen3
+    if vae is not None:
+        components["vae"] = vae
+    def action() -> None:
+        base = add_base(
+            base_id,
+            path,
+            name=name,
+            family=family,
+            prediction_type=prediction_type,
+            components=components,
+            root=repository_root(),
         )
-    )
+        console.print(f"[green]Registered[/green] {base.id}")
+
+    _invoke(action)
 
 
 @base_app.command("inspect")

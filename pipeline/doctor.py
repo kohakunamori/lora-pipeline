@@ -59,6 +59,18 @@ def run_doctor(*, root: Path | None = None) -> dict[str, Any]:
         sd_scripts = Path(info["sd_scripts_path"])
         entrypoint = sd_scripts / "sdxl_train_network.py"
         record("sd-scripts entrypoint", entrypoint.is_file(), str(entrypoint))
+        anima_bases = [base for base in load_base_registry(root).values() if base.enabled and base.family == "anima"]
+        anima_entrypoint = sd_scripts / "anima_train_network.py"
+        record("Anima sd-scripts entrypoint", not anima_bases or anima_entrypoint.is_file(),
+               str(anima_entrypoint), required=bool(anima_bases))
+        incomplete = [base.id for base in anima_bases if not {"qwen3", "vae"}.issubset(base.components)]
+        missing_components = [
+            f"{base.id}: {name}={path}" for base in anima_bases
+            for name, path in base.components.items() if name in {"qwen3", "vae"} and not path.is_file()
+        ]
+        record("Anima base components", not anima_bases or (not incomplete and not missing_components),
+               missing_components + [f"{base_id}: missing qwen3/vae" for base_id in incomplete],
+               required=bool(anima_bases))
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=sd_scripts, check=False, capture_output=True, text=True
         )
@@ -120,6 +132,10 @@ def run_doctor(*, root: Path | None = None) -> dict[str, Any]:
     try:
         bases = load_base_registry(root)
         missing = [f"{base_id}: {base.path}" for base_id, base in bases.items() if base.enabled and not base.path.is_file()]
+        missing.extend(
+            f"{base_id} component {name}: {path}" for base_id, base in bases.items()
+            if base.enabled for name, path in base.components.items() if not path.is_file()
+        )
         record(
             "Registered base paths",
             bool(bases) and not missing,

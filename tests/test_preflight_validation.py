@@ -12,7 +12,8 @@ from pipeline.dataset.image_info import inspect_dataset
 from pipeline.materialization import run as materialize
 from pipeline.models import PipelineError
 from pipeline.state import ProjectState
-from pipeline.steps import preflight
+from pipeline.steps import preflight, preflight_core
+from pipeline.tokenizers import TokenCounts
 
 
 def _project(tmp_path: Path, monkeypatch) -> ProjectState:
@@ -88,4 +89,32 @@ def test_preflight_blocks_exact_training_duplicate_in_holdout(tmp_path, monkeypa
         state.project_dir / "validation" / "leaked.png",
     )
     with pytest.raises(PipelineError, match="exact training duplicate"):
+        preflight.run(state, minimum_free_gib=0)
+
+
+def test_anima_preflight_uses_qwen3_budget_and_component_paths(tmp_path, monkeypatch) -> None:
+    state = _project(tmp_path, monkeypatch)
+    root = state.project_dir.parent.parent
+    registry_path = root / "bases" / "registry.yaml"
+    registry = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    qwen3 = root / "qwen3.safetensors"
+    vae = root / "vae.safetensors"
+    qwen3.write_bytes(b"qwen3")
+    vae.write_bytes(b"vae")
+    registry["bases"]["base"]["family"] = "anima"
+    registry["bases"]["base"]["components"] = {
+        "qwen3": {"path": str(qwen3)},
+        "vae": {"path": str(vae)},
+    }
+    registry_path.write_text(yaml.safe_dump(registry), encoding="utf-8")
+    monkeypatch.setattr(
+        preflight_core,
+        "count_project_tokens",
+        lambda text, project, root=None: TokenCounts(
+            clip_l=0, clip_g=0, exact=True,
+            backend="test.Qwen3Tokenizer", qwen3=513,
+        ),
+    )
+
+    with pytest.raises(PipelineError, match="512-token Qwen3 budget"):
         preflight.run(state, minimum_free_gib=0)

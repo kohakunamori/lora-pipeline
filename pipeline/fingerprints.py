@@ -4,7 +4,7 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
-from .config import load_base_registry, resolve_profiles, sha256_file, stable_hash
+from .config import load_base_registry, resolve_project_profiles, sha256_file, stable_hash
 from .dataset.image_info import discover_images
 from .models import PROJECT_RUN_STEPS, STEP_ALIASES, PipelineError
 from .prepared import load_current_generation
@@ -137,12 +137,7 @@ def _training_profile_slice(merged: Mapping[str, Any]) -> dict[str, Any]:
 
 def _profiles(state: "ProjectState"):
     project = state.payload["project"]
-    return resolve_profiles(
-        str(project.get("hardware", "v100_16gb")),
-        str(project["type"]),
-        str(project.get("strategy", "quality")),
-        project_overrides=project.get("overrides", {}),
-    )
+    return resolve_project_profiles(project)
 
 
 def _image_fingerprints(root: Path) -> list[dict[str, Any]]:
@@ -202,8 +197,19 @@ def _base_fingerprint(state: "ProjectState") -> Mapping[str, Any]:
     return {
         "id": base.id,
         "path": str(base.path),
+        "family": base.family,
         "registered_sha256": base.sha256,
         "stat": stat,
+        "components": {
+            name: {
+                "path": str(path),
+                "stat": {
+                    "bytes": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns,
+                    "inode": path.stat().st_ino, "device": path.stat().st_dev,
+                } if path.is_file() else None,
+            }
+            for name, path in base.components.items()
+        },
         "generation_defaults": dict(base.generation_defaults),
     }
 

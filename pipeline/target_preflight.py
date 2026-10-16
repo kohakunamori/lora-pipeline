@@ -5,7 +5,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
 
-from .config import resolve_profiles, stable_hash, write_json_atomic
+from .config import resolve_project_profiles, stable_hash, write_json_atomic
 from .models import PipelineError, StepResult
 from .prepared import load_current_generation
 from .target_training_advisor import target_training_advice
@@ -72,12 +72,7 @@ def install_target_preflight_hook(preflight_module: ModuleType) -> None:
 def _augment_preflight_report(state, report: dict[str, Any]) -> None:
     project = state.payload["project"]
     target_type = str(project.get("training_target_type", project.get("type", "character")))
-    profiles = resolve_profiles(
-        str(project.get("hardware", "v100_16gb")),
-        str(project["type"]),
-        str(project.get("strategy", "quality")),
-        project_overrides=project.get("overrides", {}),
-    )
+    profiles = resolve_project_profiles(project)
 
     caption_manifest = _caption_manifest(state)
     image_count = _prepared_image_count(state)

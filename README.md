@@ -1,9 +1,14 @@
 # LoRA Pipeline
 
 A resumable, CLI/TUI-first pipeline for Character and Style LoRA training on
-local Illustrious/SDXL checkpoints. Training is delegated to a pinned
+local Illustrious/SDXL or Anima checkpoints. Training is delegated to a pinned
 [`sd-scripts`](https://github.com/kohya-ss/sd-scripts) checkout; this repository
-does not implement a custom SDXL training loop.
+does not implement custom training loops.
+
+Anima training uses the pinned anima_train_network.py entrypoint and requires
+registered Qwen3 text-encoder and Qwen-Image VAE components. The V100 profile
+uses FP16 and SDPA. Automated evaluation remains SDXL-only; review Anima
+checkpoints in ComfyUI.
 
 The bundled hardware profile targets a 16 GB NVIDIA V100 (`sm_70`) with FP16,
 PyTorch SDPA, 1024-area buckets, and profile-driven dataloader settings. The
@@ -78,7 +83,7 @@ compatibility history when loaded and are never replayed by normal orchestration
   `torch.cuda.get_arch_list()` must contain `sm_70`.
 - A local `sd-scripts` checkout pinned to the commit recorded in
   `environment/environment-info.json`.
-- One or more local Illustrious/SDXL checkpoints that you are permitted to use.
+- One or more local Illustrious/SDXL or Anima checkpoints and their required components that you are permitted to use.
 
 Machine-specific configuration is intentionally excluded from Git. Copy the
 example environment record only when provisioning the host:
@@ -109,14 +114,15 @@ There is intentionally no Web UI entry point.
 
 ```bash
 ./lora base add one_obsession_v19 /models/one-obsession-v19.safetensors
+./lora base add anima_base /models/anima-base-v1.0.safetensors --family anima --qwen3 /models/qwen3_06b.safetensors --vae /models/qwen-image-vae.safetensors
 ./lora base inspect one_obsession_v19
 ./lora base verify one_obsession_v19
 ./lora base list
 ```
 
-The registry caches a full SHA256 together with a file stat signature. If the
-checkpoint content changes, preflight blocks instead of silently accepting the
-new file under the old base identity.
+The registry caches full SHA256 identities for the checkpoint and each Anima
+component together with file stat signatures. If registered content changes,
+preflight blocks instead of silently accepting the new files.
 
 ## Dataset Workspace
 

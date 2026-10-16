@@ -8,7 +8,7 @@ from typing import Any
 from .config import stable_hash, write_json_atomic
 from .dataset.caption_cleaner import STYLE_DESCRIPTOR_PATTERNS, normalize_tag, parse_caption
 from .models import StepResult, StepStatus
-from .tokenizers import count_sdxl_tokens
+from .tokenizers import count_project_tokens
 
 
 def install_style_caption_policy_hook(caption_module: ModuleType) -> None:
@@ -67,15 +67,9 @@ def apply_style_caption_policy(state, result: StepResult) -> StepResult:
         suppressed_total += len(suppressed)
         destination = Path(str(record["caption"]))
         destination.write_text(text + "\n", encoding="utf-8")
-        counts = count_sdxl_tokens(text)
+        counts = count_project_tokens(text, project)
         record["text"] = text
-        record["token_counts"] = {
-            "clip_l": counts.clip_l,
-            "clip_g": counts.clip_g,
-            "exact": counts.exact,
-            "backend": counts.backend,
-            "error": counts.error,
-        }
+        record["token_counts"] = counts.as_dict()
         record["style_descriptors_suppressed"] = suppressed
 
     manifest.pop("input_hash", None)

@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..budget import resolve_budget
-from ..config import load_base_registry, resolve_profiles, stable_hash, write_yaml_atomic
+from ..bases import resolve_base_component_fingerprints
+from ..config import load_base_registry, resolve_project_profiles, stable_hash, write_yaml_atomic
 from ..models import PipelineError, StepResult, TrainingRequest, TrainingResult
 from ..prepared import load_current_generation
 from ..state import ProjectState
@@ -34,12 +35,8 @@ def run(
     if base_id not in registry:
         raise PipelineError(f"Base model is not registered: {base_id}")
     base = registry[base_id]
-    profiles = resolve_profiles(
-        str(project.get("hardware", "v100_16gb")),
-        str(project["type"]),
-        str(project.get("strategy", "quality")),
-        project_overrides=project.get("overrides", {}),
-    )
+    profiles = resolve_project_profiles(project)
+    component_fingerprints = resolve_base_component_fingerprints(base_id)
     generation = load_current_generation(state.project_dir)
     image_count = len(generation.manifest.get("images", []))
     budget = resolve_budget(
@@ -81,7 +78,13 @@ def run(
             "path": str(run_dir),
             "status": "configuring" if dry_run else "running",
             "started_at": datetime.now(UTC).isoformat(),
-            "base": {"id": base.id, "filename": base.path.name, "sha256": base.sha256},
+            "base": {
+                "id": base.id,
+                "filename": base.path.name,
+                "sha256": base.sha256,
+                "family": base.family,
+                "components": component_fingerprints,
+            },
         }
         state.payload.setdefault("runs", []).append(run_record)
     run_record["resolved_budget"] = budget.as_dict()
@@ -161,6 +164,8 @@ def run(
     input_hash = stable_hash(
         {
             "base_sha256": base.sha256,
+            "base_components": component_fingerprints,
+            "base_family": base.family,
             "config": result.metrics.get("config_hash"),
             "dataset_snapshot_hash": result.accounting.get("dataset_snapshot_hash"),
             "captions_hash": result.accounting.get("captions_hash"),

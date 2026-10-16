@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..config import resolve_profiles, stable_hash, write_json_atomic
+from ..config import resolve_project_profiles, stable_hash, write_json_atomic
 from ..dataset.caption_cleaner import caption_prefix, clean_caption, parse_caption
 from ..dataset.image_info import discover_images, unique_caption_relative
 from ..dataset.tagger import (
@@ -18,7 +18,7 @@ from ..dataset.tagger import (
 )
 from ..models import PipelineError, StepResult, StepStatus
 from ..state import ProjectState
-from ..tokenizers import TokenCounts, count_sdxl_tokens
+from ..tokenizers import TokenCounts, count_project_tokens
 
 
 CAPTION_MODES = {
@@ -51,12 +51,7 @@ def run(
     generated_root.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
     conflict_count = 0
-    profiles = resolve_profiles(
-        project.get("hardware", "v100_16gb"),
-        project["type"],
-        project.get("strategy", "quality"),
-        project_overrides=project.get("overrides", {}),
-    )
+    profiles = resolve_project_profiles(project)
     # Use merged caption settings so specialized training targets can add fixed
     # anchors without creating a second runtime concept profile.
     caption_config = profiles.merged.get("caption", {})
@@ -94,7 +89,7 @@ def run(
                 continue
             shutil.copy2(source, destination)
             text = source.read_text(encoding="utf-8", errors="replace").strip()
-            counts = count_sdxl_tokens(text)
+            counts = count_project_tokens(text, project)
             records.append(
                 _base_record(
                     relative=relative,
@@ -332,10 +327,10 @@ def _clean_and_prune(
     )
     retained = list(cleaned.tags)
     pruned = list(cleaned.pruned)
-    counts = count_sdxl_tokens(", ".join(retained))
+    counts = count_project_tokens(", ".join(retained), project)
     while len(retained) > len(fixed) and counts.maximum > max_tokens:
         pruned.append(retained.pop())
-        counts = count_sdxl_tokens(", ".join(retained))
+        counts = count_project_tokens(", ".join(retained), project)
     if counts.maximum > max_tokens:
         raise PipelineError(
             "Required trigger/anchor caption prefix exceeds the configured "
@@ -358,13 +353,7 @@ def _base_record(
         "caption": str(destination),
         "mode": mode,
         "text": text,
-        "token_counts": {
-            "clip_l": counts.clip_l,
-            "clip_g": counts.clip_g,
-            "exact": counts.exact,
-            "backend": counts.backend,
-            "error": counts.error,
-        },
+        "token_counts": counts.as_dict(),
         "pruned": pruned,
     }
 

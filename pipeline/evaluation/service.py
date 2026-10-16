@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..config import load_base_registry, resolve_profiles, sha256_file, stable_hash, write_json_atomic
+from ..config import load_base_registry, resolve_project_profiles, sha256_file, stable_hash, write_json_atomic
 from ..dataset.caption_cleaner import normalize_tag, parse_caption
 from ..dataset.image_info import discover_images
 from ..dataset.style import distribution_summary
@@ -74,12 +74,11 @@ def run(
             raise PipelineError("Unknown checkpoint selection: " + ", ".join(sorted(missing)))
     registry = load_base_registry()
     base = registry[str(project["base"])]
-    profiles = resolve_profiles(
-        str(project.get("hardware", "v100_16gb")),
-        str(project["type"]),
-        str(project.get("strategy", "quality")),
-        project_overrides=project.get("overrides", {}),
-    )
+    if base.family == "anima":
+        raise PipelineError(
+            "Automated evaluation currently uses the SDXL generator; evaluate Anima checkpoints in ComfyUI."
+        )
+    profiles = resolve_project_profiles(project)
     evaluation = profiles.merged.get("evaluation", {})
     prompts, strengths = _stage_matrix(evaluation, stage=stage, concept_type=state.concept_type)
     if not prompts or not strengths:

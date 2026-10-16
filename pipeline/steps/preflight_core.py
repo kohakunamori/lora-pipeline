@@ -7,13 +7,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..bases import resolve_base_sha256
+from ..bases import resolve_base_component_fingerprints, resolve_base_sha256
 from ..budget import resolve_budget
 from ..config import (
     load_base_registry,
     read_yaml,
     repository_root,
-    resolve_profiles,
+    resolve_project_profiles,
     sha256_file,
     stable_hash,
     write_json_atomic,
@@ -23,7 +23,7 @@ from ..dataset.image_info import inspect_dataset
 from ..models import PipelineError, StepResult
 from ..prepared import load_current_generation
 from ..state import ProjectState
-from ..tokenizers import count_sdxl_tokens
+from ..tokenizers import count_project_tokens
 
 
 def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
@@ -34,13 +34,7 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
     if base_id not in registry:
         raise PipelineError(f"Base model is not registered: {base_id}")
     base = registry[base_id]
-    profiles = resolve_profiles(
-        str(project.get("hardware", "v100_16gb")),
-        str(project["type"]),
-        str(project.get("strategy", "quality")),
-        project_overrides=project.get("overrides", {}),
-        root=root,
-    )
+    profiles = resolve_project_profiles(project, root=root)
     blocking: list[str] = []
     warnings: list[str] = []
     checks: dict[str, Any] = {}
@@ -55,9 +49,20 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         actual_sha, cache_reused, stat_signature = resolve_base_sha256(base_id, root=root)
         if base.sha256 and actual_sha != base.sha256:
             blocking.append(f"Base SHA256 mismatch: expected {base.sha256}, got {actual_sha}")
+    component_fingerprints: dict[str, dict[str, Any]] = {}
+    component_error: str | None = None
+    if base.family == "anima" or base.components:
+        try:
+            component_fingerprints = resolve_base_component_fingerprints(base_id, root=root)
+        except PipelineError as exc:
+            component_error = str(exc)
+            blocking.append(component_error)
     checks["base"] = {
         "id": base.id,
         "name": base.name,
+        "family": base.family,
+        "components": component_fingerprints,
+        "components_ok": component_error is None,
         "path": str(base.path),
         "exists": base_exists,
         "expected_sha256": base.sha256,
@@ -149,6 +154,7 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
 
     clip_l_counts: list[int] = []
     clip_g_counts: list[int] = []
+    qwen3_counts: list[int] = []
     missing_captions: list[str] = []
     fallback_errors: set[str] = set()
     max_tokens = int(
@@ -173,9 +179,12 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
                 missing_captions.append(source_name)
                 continue
             text = caption_path.read_text(encoding="utf-8", errors="replace").strip()
-            counts = count_sdxl_tokens(text)
-            clip_l_counts.append(counts.clip_l)
-            clip_g_counts.append(counts.clip_g)
+            counts = count_project_tokens(text, project, root=root)
+            if base.family == "anima":
+                qwen3_counts.append(counts.maximum)
+            else:
+                clip_l_counts.append(counts.clip_l)
+                clip_g_counts.append(counts.clip_g)
             if not counts.exact and counts.error:
                 fallback_errors.add(counts.error)
             if enforce_fixed_prefix:
@@ -205,29 +214,39 @@ def run(state: ProjectState, *, minimum_free_gib: float = 10.0) -> StepResult:
         )
     truncated_l = sum(value > max_tokens for value in clip_l_counts)
     truncated_g = sum(value > max_tokens for value in clip_g_counts)
-    if truncated_l or truncated_g:
+    truncated_qwen3 = sum(value > max_tokens for value in qwen3_counts)
+    if truncated_qwen3:
+        blocking.append(
+            f"Captions exceed the configured {max_tokens}-token Qwen3 budget "
+            f"(Qwen3={truncated_qwen3})"
+        )
+    elif truncated_l or truncated_g:
         blocking.append(
             f"Captions exceed the configured {max_tokens}-token budget "
             f"(CLIP-L={truncated_l}, CLIP-G={truncated_g})"
         )
     if fallback_errors:
+        tokenizer_family = "Qwen3" if base.family == "anima" else "SDXL"
         warnings.append(
-            "Exact SDXL tokenizer assets were unavailable; token counts use a heuristic. "
-            "Cache both SDXL tokenizers and rerun preflight for exact truncation checks."
+            f"Exact {tokenizer_family} tokenizer assets were unavailable; token counts use a heuristic. "
+            "Cache the tokenizer locally and rerun preflight for exact truncation checks."
         )
     if trigger_only:
         label = "trigger/anchor-only" if len(fixed_prefix) > 1 else "trigger-only"
         warnings.append(f"{trigger_only} caption(s) explicitly use {label} training")
     checks["captions"] = {
-        "present": len(clip_l_counts),
+        "present": len(clip_l_counts) + len(qwen3_counts),
+        "tokenizer_family": "qwen3" if base.family == "anima" else "sdxl",
         "missing": missing_captions,
         "tokenizer_exact": not fallback_errors,
         "tokenizer_fallback_errors": sorted(fallback_errors),
         "clip_l": _stats(clip_l_counts),
         "clip_g": _stats(clip_g_counts),
+        "qwen3": _stats(qwen3_counts),
         "budget": max_tokens,
         "truncated_clip_l": truncated_l,
         "truncated_clip_g": truncated_g,
+        "truncated_qwen3": truncated_qwen3,
         "trigger_only": trigger_only,
         "required_prefix": list(fixed_prefix),
         "fixed_prefix_enforced": enforce_fixed_prefix,

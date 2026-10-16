@@ -61,6 +61,7 @@ class BaseModel:
     prediction_type: str
     sha256: str | None
     enabled: bool
+    components: Mapping[str, Path] = field(default_factory=dict)
     generation_defaults: Mapping[str, Any] = field(default_factory=dict)
 
 

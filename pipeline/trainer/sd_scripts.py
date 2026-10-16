@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
 from .. import gpu_resources
+from ..bases import resolve_base_component_fingerprints
 from ..config import repository_root, sha256_file, stable_hash, write_json_atomic
 from ..models import ExternalCommandError, PipelineError, TrainingRequest, TrainingResult
 from ..model_artifact import (
@@ -108,6 +109,7 @@ def _supported_metadata_parameters(sd_scripts: Path, entrypoint: Path) -> set[st
         entrypoint,
         sd_scripts / "train_network.py",
         sd_scripts / "sdxl_train_network.py",
+        sd_scripts / "anima_train_network.py",
         sd_scripts / "library" / "sai_model_spec.py",
     ]
     existing: list[Path] = []
@@ -422,7 +424,16 @@ class SdScriptsTrainer(TrainerBackend):
         python = Path(info["python_path"])
         accelerate = python.parent / "accelerate"
         sd_scripts = Path(info["sd_scripts_path"])
-        entrypoint = sd_scripts / "sdxl_train_network.py"
+        component_fingerprints = {}
+        if request.base.family == "anima":
+            entrypoint = sd_scripts / "anima_train_network.py"
+            component_fingerprints = resolve_base_component_fingerprints(
+                request.base.id, root=self.root
+            )
+            if not {"qwen3", "vae"}.issubset(request.base.components):
+                raise PipelineError("Anima training requires registered qwen3 and vae components")
+        else:
+            entrypoint = sd_scripts / "sdxl_train_network.py"
         for required in (python, accelerate, entrypoint):
             if not required.exists():
                 raise PipelineError(f"Validated training component is missing: {required}")
@@ -517,20 +528,32 @@ class SdScriptsTrainer(TrainerBackend):
             "gradient_accumulation_steps": int(
                 training.get("gradient_accumulation_steps", 1)
             ),
-            "max_token_length": int(
-                merged.get("caption", {}).get(
-                    "max_token_length",
-                    request.config.hardware.get("caption", {}).get(
-                        "default_max_token_length", 75
-                    ),
-                )
-            ),
             "seed": int(training.get("seed", 42)),
             "save_model_as": "safetensors",
             "save_every_n_steps": save_interval,
             "save_state": save_state,
             "resume": str(request.resume_state) if request.resume_state else None,
         }
+        if request.base.family == "anima":
+            caption = merged.get("caption", {})
+            train_values.update(
+                {
+                    "qwen3": str(request.base.components["qwen3"]),
+                    "vae": str(request.base.components["vae"]),
+                    "qwen3_max_token_length": int(caption.get("max_token_length", 512)),
+                    "timestep_sampling": training.get("timestep_sampling", "sigmoid"),
+                    "discrete_flow_shift": float(training.get("discrete_flow_shift", 1.0)),
+                    "vae_chunk_size": int(training.get("vae_chunk_size", 64)),
+                    "attn_mode": "sdpa" if attention.get("backend") == "sdpa" else "torch",
+                }
+            )
+        else:
+            train_values["max_token_length"] = int(
+                merged.get("caption", {}).get(
+                    "max_token_length",
+                    request.config.hardware.get("caption", {}).get("default_max_token_length", 75),
+                )
+            )
         metadata_parameters = build_sd_scripts_metadata(model_metadata)
         supported_metadata = _supported_metadata_parameters(sd_scripts, entrypoint)
         train_values.update(
@@ -599,6 +622,8 @@ class SdScriptsTrainer(TrainerBackend):
                 "filename": request.base.path.name,
                 "path": str(request.base.path),
                 "sha256": request.base.sha256,
+                "family": request.base.family,
+                "components": component_fingerprints,
             },
             "sd_scripts_commit": info["sd_scripts_commit"],
             "environment": info,
@@ -609,7 +634,9 @@ class SdScriptsTrainer(TrainerBackend):
             },
             "accounting": accounting,
             "command": command,
-            "config_hash": stable_hash({"train": train_values, "merged": merged}),
+            "config_hash": stable_hash(
+                {"train": train_values, "merged": merged, "base_family": request.base.family}
+            ),
             "pipeline_git_commit": _git_commit(self.root),
             "cli_command": list(request.command_line),
             "storage": {

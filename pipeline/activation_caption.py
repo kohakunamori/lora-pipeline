@@ -7,7 +7,7 @@ from typing import Any
 from .config import stable_hash, write_json_atomic
 from .dataset.caption_cleaner import normalize_tag, parse_caption
 from .models import PipelineError, StepResult, StepStatus
-from .tokenizers import count_sdxl_tokens
+from .tokenizers import count_project_tokens
 
 
 def apply_activation_group_captions(state, result: StepResult) -> StepResult:
@@ -89,15 +89,9 @@ def apply_activation_group_captions(state, result: StepResult) -> StepResult:
         if not caption_path:
             raise PipelineError(f"Prepared image {image_key!r} has no caption path")
         caption_path.write_text(text + "\n", encoding="utf-8")
-        counts = count_sdxl_tokens(text)
+        counts = count_project_tokens(text, project)
         record["text"] = text
-        record["token_counts"] = {
-            "clip_l": counts.clip_l,
-            "clip_g": counts.clip_g,
-            "exact": counts.exact,
-            "backend": counts.backend,
-            "error": counts.error,
-        }
+        record["token_counts"] = counts.as_dict()
         record["activation_group"] = {
             "name": group_name,
             "group_tag": group_tag,

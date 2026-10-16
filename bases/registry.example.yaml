@@ -1,2 +1,3 @@
 # `./lora base add` creates the ignored `bases/registry.yaml` file.
+# For family: anima, components must include qwen3 and vae paths.
 bases: {}
